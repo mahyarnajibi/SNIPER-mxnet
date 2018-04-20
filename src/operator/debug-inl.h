@@ -120,17 +120,12 @@ class DebugProp : public OperatorProperty {
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
     const TShape &dshape = in_shape->at(0);
-    if (dshape.ndim() == 0) return false;
-    in_shape->at(1) = TShape(Shape1(dshape[1]));
-    in_shape->at(2) = TShape(Shape1(dshape[1]));
+
+
     out_shape->clear();
     out_shape->push_back(dshape);
-    out_shape->push_back(Shape1(dshape[1]));
-    out_shape->push_back(Shape1(dshape[1]));
 
-    aux_shape->clear();
-    aux_shape->push_back(Shape1(dshape[1]));
-    aux_shape->push_back(Shape1(dshape[1]));
+    
     return true;
   }
 
