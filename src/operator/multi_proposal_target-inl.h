@@ -61,7 +61,7 @@ struct MultiProposalTargetParam : public dmlc::Parameter<MultiProposalTargetPara
   nnvm::Tuple<float> ratios;
   int feature_stride;
   DMLC_DECLARE_PARAMETER(MultiProposalTargetParam) {
-    float tmp[] = {0, 0, 0, 0};
+    float tmp[] = {0, 0, 0, 0, 0, 0, 0};
     DMLC_DECLARE_FIELD(rpn_pre_nms_top_n).set_default(6000)
     .describe("Number of top scoring boxes to keep after applying NMS to RPN proposals");
     DMLC_DECLARE_FIELD(rpn_post_nms_top_n).set_default(300)

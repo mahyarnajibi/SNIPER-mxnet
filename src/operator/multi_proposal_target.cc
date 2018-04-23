@@ -44,8 +44,8 @@ inline void BBoxTransformInv(float* boxes,
   int heights = deltas.size(2);
   int widths = deltas.size(3);
   int num_anchors = anchors * heights * widths;
-
-  //#pragma omp parallel for num_threads(8)
+  //usleep(20000000);
+  #pragma omp parallel for num_threads(8)
   for (int t = 0; t < num_images * num_anchors; ++t) {
     int b = t / num_anchors;
     int index = t % num_anchors;
@@ -76,10 +76,10 @@ inline void BBoxTransformInv(float* boxes,
     pred_x2 = std::max(std::min(pred_x2, im_info[3*b] - 1.0f), 0.0f);
     pred_y2 = std::max(std::min(pred_y2, im_info[3*b+1] - 1.0f), 0.0f);
 
-    boxes[5*index] = pred_x1;
-    boxes[5*index + 1] = pred_y1;
-    boxes[5*index + 2] = pred_x2;
-    boxes[5*index + 3] = pred_y2;
+    boxes[5*t] = pred_x1;
+    boxes[5*t + 1] = pred_y1;
+    boxes[5*t + 2] = pred_x2;
+    boxes[5*t + 3] = pred_y2;
   }
 }
 
@@ -155,11 +155,10 @@ inline void NonMaximumSuppression(float* dets,
   
   int total_anchors = num_images*num_anchors*width*height;
   int chip_anchors = num_anchors*width*height;
-  int chip_size = width*height;
-
+  
   float *area = new float[total_anchors];
 
-  //#pragma omp parallel for num_threads(8)
+  #pragma omp parallel for num_threads(8)
   for (int i = 0; i < total_anchors; ++i) {
     area[i] = (dets[5*i + 2] - dets[5*i + 0] + 1) * (dets[5*i + 3] - dets[5*i + 1] + 1);
     int imid = i/chip_anchors;
@@ -168,108 +167,66 @@ inline void NonMaximumSuppression(float* dets,
     }
   }
 
-  // calculate nms
-  std::vector <std::vector <int> > keep_images(num_images);
+  int max_nms = 4000;
+  #pragma omp parallel for num_threads(8)
   for (int i = 0; i < num_images; i++) {
-    keep_images[i] =  std::vector<int>(0);
-  }
-
-  //#pragma omp parallel for num_threads(8)
-  for (int i = 0; i < num_images; i++) {
-    for (int j = 0; j < num_anchors; j++) { 
-      //sort scores of each chip first
-      std::vector <int> sortids(chip_size);
-      for (int k = 0; k < chip_size; k++) {
-        sortids[k] = k;
-      }
-      int chip_index = i*chip_anchors + j*chip_size;
-      std::sort(sortids.begin(), sortids.end(), 
-        [&dets,chip_index](int i1, int i2) {
-          return dets[5*(chip_index + i1) + 4] > dets[5*(chip_index + i2) + 4];
-        });
-
-      for (int k = 0; k < chip_size; k++) {
-        int index = i*chip_anchors + j*chip_size + sortids[k];
-        float ix1 = dets[5*index];
-        float iy1 = dets[5*index+1];
-        float ix2 = dets[5*index+2];
-        float iy2 = dets[5*index+3];
-        float iarea = area[index];
-
-        if (dets[5*index+4] == -1) {
-          continue;
-        }
-
-        keep_images[i].push_back(j*chip_size+k);        
-        for (int pind = k + 1; pind < chip_size; pind++) {
-          int nms_index = (chip_index + sortids[pind]);
-          if (dets[5*nms_index + 4] == -1) {
-            continue;
-          } 
-          float xx1 = std::max(ix1, dets[5*nms_index]);
-          float yy1 = std::max(iy1, dets[5*nms_index + 1]);
-          float xx2 = std::min(ix2, dets[5*nms_index + 2]);
-          float yy2 = std::min(iy2, dets[5*nms_index + 3]);
-          float w = std::max(0.0f, xx2 - xx1 + 1.0f);
-          float h = std::max(0.0f, yy2 - yy1 + 1.0f);
-          float inter = w * h;
-          float ovr = inter / (iarea + area[nms_index] - inter);
-          if (ovr > 0.8) {
-            dets[5*nms_index + 4] = -1;
-          }
-        }
-      }
-    }
-  }
-
-  //now do nms on everything together
-  //#pragma omp parallel for num_threads(8)
-  for (int i = 0; i < num_images; i++) {
-    int num_entries = keep_images[i].size();
-    std::vector <int> * kptr;
-    kptr = &keep_images[i];
-    std::vector <float> sortids(num_entries);
-    for (int j = 0; j < num_entries; j++) {
+    std::vector <float> sortids(chip_anchors);
+    for (int j = 0; j < chip_anchors; j++) {
       sortids[j] = j;
     }
     int chip_index = i*chip_anchors;
     std::sort(sortids.begin(), sortids.end(), 
-        [&dets,&kptr,chip_index](int i1, int i2) {
-          return dets[5*(chip_index + (*kptr)[i1]) + 4] > dets[5*(chip_index + (*kptr)[i2]) + 4];
+        [&dets,chip_index](int i1, int i2) {
+          return dets[5*(chip_index + i1) + 4] > dets[5*(chip_index + i2) + 4];
         });
-    
-    for (int j = 0; j < num_entries and j < post_nms_top_n; j++) {
-      int index = i*chip_anchors + sortids[j];
-      float ix1 = dets[5*index];
-      float iy1 = dets[5*index+1];
-      float ix2 = dets[5*index+2];
-      float iy2 = dets[5*index+3];
-      float iarea = area[index];
+    float *dbuf = new float[6*max_nms];
 
-      if (dets[5*index+4] == -1) {
+    //reorder for spatial locality in CPU, yo!
+    for (int j = 0; j < max_nms; j++) {
+      int index = i*chip_anchors + sortids[j];
+      dbuf[6*j] = dets[5*index];
+      dbuf[6*j+1] = dets[5*index+1];
+      dbuf[6*j+2] = dets[5*index+2];
+      dbuf[6*j+3] = dets[5*index+3];
+      dbuf[6*j+4] = dets[5*index+4];
+      dbuf[6*j+5] = area[index];
+    }
+
+    int vct = 0;
+    for (int j = 0; j < max_nms && vct < post_nms_top_n; j++) {
+      int index = i*chip_anchors + sortids[j];
+      float ix1 = dbuf[6*j];
+      float iy1 = dbuf[6*j+1];
+      float ix2 = dbuf[6*j+2];
+      float iy2 = dbuf[6*j+3];
+      float iarea = dbuf[6*j+5];
+
+      if (dbuf[6*j+4] == -1) {
         continue;
       }
 
       final_keep_images[i].push_back(index);
-
-      for (int pind = j + 1; pind < num_entries && pind < 6000; pind++) {
-        int nms_index = (chip_index + sortids[pind]);
-        if (dets[5*nms_index + 4] == -1) {
+      vct = vct + 1;
+      for (int pind = j + 1; pind < max_nms; pind++) {
+        if (dbuf[6*pind + 4] == -1) {
           continue;
         } 
-        float xx1 = std::max(ix1, dets[5*nms_index]);
-        float yy1 = std::max(iy1, dets[5*nms_index + 1]);
-        float xx2 = std::min(ix2, dets[5*nms_index + 2]);
-        float yy2 = std::min(iy2, dets[5*nms_index + 3]);
+        float xx1 = std::max(ix1, dbuf[6*pind]);
+        float yy1 = std::max(iy1, dbuf[6*pind + 1]);
+        float xx2 = std::min(ix2, dbuf[6*pind + 2]);
+        float yy2 = std::min(iy2, dbuf[6*pind + 3]);
         float w = std::max(0.0f, xx2 - xx1 + 1.0f);
         float h = std::max(0.0f, yy2 - yy1 + 1.0f);
         float inter = w * h;
-        float ovr = inter / (iarea + area[nms_index] - inter);
+        float ovr = inter / (iarea + dbuf[6*pind+5] - inter);
         if (ovr > 0.7) {
-          dets[5*nms_index + 4] = -1;
+          dbuf[6*pind + 4] = -1;
         }
       }
     }
+
+
+    delete [] dbuf;
   }
   delete [] area;
 }
@@ -293,6 +250,7 @@ class MultiProposalTargetOp : public Operator{
     using namespace mshadow::expr;
     CHECK_EQ(in_data.size(), 5);
     CHECK_EQ(out_data.size(), 4);
+    //std::cout << "quack 1" << std::endl;
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<cpu, 4> scores = in_data[proposal::kClsProb].get<cpu, 4, real_t>(s);
     Tensor<cpu, 4> tbbox_deltas = in_data[proposal::kBBoxPred].get<cpu, 4, real_t>(s);
@@ -308,10 +266,9 @@ class MultiProposalTargetOp : public Operator{
     int num_anchors = tbbox_deltas.size(1) / 4;
     int height = tbbox_deltas.size(2);
     int width = tbbox_deltas.size(3);
-    std::cout << "quack 0" << std::endl;
     //number of anchors per chip
     int count_anchors = num_anchors*height*width;
-
+    //std::cout << "quack 2" << std::endl;
     //total number of anchors in a batch
     int total_anchors = count_anchors * num_images;
     
@@ -320,7 +277,7 @@ class MultiProposalTargetOp : public Operator{
     float *valid_ranges = new float[num_images*2];
 
     std::vector<float> base_anchor(4);
-    usleep(20000000);
+    //usleep(20000000);
     base_anchor[0] = 0.0;
     base_anchor[1] = 0.0;
     base_anchor[2] = param_.feature_stride - 1.0;
@@ -332,9 +289,8 @@ class MultiProposalTargetOp : public Operator{
                            param_.scales,
                            &anchors);
 
-    std::cout << "quack 1" << std::endl;
-
-    //#pragma omp parallel for num_threads(8)
+    //std::cout << "quack 3" << std::endl;
+    #pragma omp parallel for num_threads(8)
     for (int t = 0; t < total_anchors; ++t) {
       int b = t / count_anchors;
       int index = t % count_anchors;
@@ -349,8 +305,7 @@ class MultiProposalTargetOp : public Operator{
       proposals[5*t + 4] = scores[b][1][i*height + j][k];
     }
 
-    std::cout << "quack 2" << std::endl;
-
+    //std::cout << "quack 4" << std::endl;
     //copy im_info
     for (int i = 0; i < num_images; i++) {
       im_info[i*3] = tim_info[i][0];
@@ -360,20 +315,19 @@ class MultiProposalTargetOp : public Operator{
       valid_ranges[i*2+1] = tvalid_ranges[i][1];
     }
 
-    std::cout << "quack 3" << std::endl;
     utils::BBoxTransformInv(proposals, tbbox_deltas, im_info);
+
     utils::FilterBox(proposals, total_anchors, 3);
+
     std::vector <std::vector<int> > keep_images(num_images);
     for (int i = 0; i < num_images; i++) {
       keep_images[i] = std::vector<int>(0);
     }
-
-    std::cout << "quack 4" << std::endl;
+    //std::cout << "quack 5" << std::endl;
     int rpn_post_nms_top_n = param_.rpn_post_nms_top_n;
     utils::NonMaximumSuppression(proposals, rpn_post_nms_top_n, num_images, num_anchors, width, height, valid_ranges, keep_images);
-
-    std::cout << "quack 5" << std::endl;
-    //#pragma omp parallel for num_threads(8)
+    //std::cout << "quack 6" << std::endl;
+    #pragma omp parallel for num_threads(8)
     for (int i = 0; i < num_images; i++) {
       int numpropsi = keep_images[i].size();
       for (int j = 0; j < numpropsi; j++) {
@@ -393,10 +347,10 @@ class MultiProposalTargetOp : public Operator{
         rois[base][3] = 100;
         rois[base][4] = 100; 
       }
+
     }
 
-    std::cout << "quack 6" << std::endl;
-
+    //std::cout << "quack 7" << std::endl;
     std::vector <int> numgts_per_image(num_images);
     std::vector <int> sumgts_per_image(num_images);
 
@@ -414,11 +368,9 @@ class MultiProposalTargetOp : public Operator{
       }
     }
 
-    std::cout << "quack 7" << std::endl;
-
     float xx1, yy1, xx2, yy2, w, h, inter, ovr, a2;
-
-    //#pragma omp parallel for num_threads(8)
+    //std::cout << "quack 8" << std::endl;
+    #pragma omp parallel for num_threads(8)
     for (int i = 0; i < num_images; i++) {
       for (int j = 0; j < rpn_post_nms_top_n; j++) {
         int basepos = rpn_post_nms_top_n*i + j;
@@ -433,22 +385,33 @@ class MultiProposalTargetOp : public Operator{
         bbox_weights[basepos][2] = 0.0;
         bbox_weights[basepos][3] = 0.0;
       }
+      int props_this_batch = keep_images[i].size();
+
+      for (int k = props_this_batch - numgts_per_image[i], j = 0; k < props_this_batch; j++, k++) {
+          float w = gt_boxes[i][j][2] - gt_boxes[i][j][0];
+          float h = gt_boxes[i][j][3] - gt_boxes[i][j][1];
+          float area = w*h;
+          if (area >= valid_ranges[2*i]*valid_ranges[2*i] && area <= valid_ranges[2*i+1]*valid_ranges[2*i+1]) {
+            rois[i*rpn_post_nms_top_n + k][1] = gt_boxes[i][j][0];
+            rois[i*rpn_post_nms_top_n + k][2] = gt_boxes[i][j][1];
+            rois[i*rpn_post_nms_top_n + k][3] = gt_boxes[i][j][2];
+            rois[i*rpn_post_nms_top_n + k][4] = gt_boxes[i][j][3];
+          }
+        }
     }
 
-    std::cout << "quack 8" << std::endl;
-
-    //#pragma omp parallel for num_threads(8)
+    #pragma omp parallel for num_threads(8)
     for (int imid = 0; imid < num_images; imid++) {
+      int tpct = 0;
       int num_gts_this_image = numgts_per_image[imid];
+      //std::cout << "gtc " << num_gts_this_image << std::endl;
       int props_this_batch = keep_images[imid].size();
-      std::cout << "quack 8.1 " << props_this_batch << " " << num_gts_this_image << std::endl;
       if (num_gts_this_image > 0) {
-        float *overlaps = new float[props_this_batch * num_gts_this_image];
+      	float *overlaps = new float[props_this_batch * num_gts_this_image];
         float *max_overlaps = new float[props_this_batch];
         for (int i = 0; i < props_this_batch; i++) {
           max_overlaps[i] = 0;
         }
-        std::cout << "quack 8.2" << std::endl;
         float *max_overlap_ids = new float[props_this_batch];
         std::set <int> positive_label_ids;
         for (int i = 0; i < props_this_batch; i++) {
@@ -458,7 +421,6 @@ class MultiProposalTargetOp : public Operator{
         for (int i = props_this_batch; i < rpn_post_nms_top_n; i++) {
           labels[imid*rpn_post_nms_top_n + i][0] = -1;
         }
-        std::cout << "quack 8.3" << std::endl;
         //get overlaps, maximum overlaps and gt labels
         for (int i = 0; i < numgts_per_image[imid]; i++) {
           float x1 = gt_boxes[imid][i][0];
@@ -475,7 +437,7 @@ class MultiProposalTargetOp : public Operator{
             yy2 = std::min(y2, rois[pbase][4]);
             w = std::max(0.0f, xx2 - xx1 + 1.0f);
             h = std::max(0.0f, yy2 - yy1 + 1.0f);
-            a2 = (xx2 - xx1) * (yy2 - yy1);
+            a2 = (rois[pbase][3] - rois[pbase][1]) * (rois[pbase][4] - rois[pbase][2]);
             inter = w * h;
             ovr = inter / (a1 + a2 - inter);
             overlaps[i*num_gts_this_image + j] = ovr;
@@ -486,10 +448,10 @@ class MultiProposalTargetOp : public Operator{
               //set labels for positive proposals
               labels[imid*rpn_post_nms_top_n + j][0] = gt_boxes[imid][i][4];
               positive_label_ids.insert(j);
+              tpct = tpct + 1;
             }
           }
         }
-        std::cout << "quack 8.4" << std::endl;
         //p is for proposal and g is for gt, cx is x center and w,h is width and height
         int pid, gtid;
         float gx1, gx2, gy1, gy2, px1, px2, py1, py2;
@@ -530,13 +492,13 @@ class MultiProposalTargetOp : public Operator{
           bbox_targets[baseid][2] = log(gw/(pw + 1e-7));
           bbox_targets[baseid][3] = log(gh/(ph + 1e-7));
         }
-        std::cout << "quack 8.5" << std::endl;
+        //std::cout << tpct << std::endl;
         delete [] max_overlap_ids;
         delete [] overlaps;
         delete [] max_overlaps;
       }      
     }
-
+    //std::cout << "quack end" << std::endl;
     delete [] im_info;
     delete [] valid_ranges;
     delete [] proposals;
