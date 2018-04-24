@@ -22,13 +22,14 @@
  * Licensed under The Apache-2.0 License [see LICENSE for details]
  * \file multi_proposal_target.cc
  * \brief Proposal target layer
+ * \author Bharat Singh
 */
 
 #include "./multi_proposal_target-inl.h"
 #include <set>
 #include <math.h>
 #include <unistd.h>
-
+#include <time.h>
 //============================
 // Bounding Box Transform Utils
 //============================
@@ -71,10 +72,10 @@ inline void BBoxTransformInv(float* boxes,
     float pred_x2 = pred_ctr_x + 0.5 * (pred_w - 1.0);
     float pred_y2 = pred_ctr_y + 0.5 * (pred_h - 1.0);
 
-    pred_x1 = std::max(std::min(pred_x1, im_info[3*b] - 1.0f), 0.0f);
-    pred_y1 = std::max(std::min(pred_y1, im_info[3*b+1] - 1.0f), 0.0f);
-    pred_x2 = std::max(std::min(pred_x2, im_info[3*b] - 1.0f), 0.0f);
-    pred_y2 = std::max(std::min(pred_y2, im_info[3*b+1] - 1.0f), 0.0f);
+    pred_x1 = std::max(std::min(pred_x1, im_info[3*b+1] - 1.0f), 0.0f);
+    pred_y1 = std::max(std::min(pred_y1, im_info[3*b] - 1.0f), 0.0f);
+    pred_x2 = std::max(std::min(pred_x2, im_info[3*b+1] - 1.0f), 0.0f);
+    pred_y2 = std::max(std::min(pred_y2, im_info[3*b] - 1.0f), 0.0f);
 
     boxes[5*t] = pred_x1;
     boxes[5*t + 1] = pred_y1;
@@ -167,7 +168,7 @@ inline void NonMaximumSuppression(float* dets,
     }
   }
 
-  int max_nms = 4000;
+  int max_nms = 6000;
   #pragma omp parallel for num_threads(8)
   for (int i = 0; i < num_images; i++) {
     std::vector <float> sortids(chip_anchors);
@@ -224,8 +225,6 @@ inline void NonMaximumSuppression(float* dets,
         }
       }
     }
-
-
     delete [] dbuf;
   }
   delete [] area;
@@ -250,6 +249,8 @@ class MultiProposalTargetOp : public Operator{
     using namespace mshadow::expr;
     CHECK_EQ(in_data.size(), 5);
     CHECK_EQ(out_data.size(), 4);
+    //clock_t t;
+    //t = clock();
     //std::cout << "quack 1" << std::endl;
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<cpu, 4> scores = in_data[proposal::kClsProb].get<cpu, 4, real_t>(s);
@@ -477,10 +478,10 @@ class MultiProposalTargetOp : public Operator{
           gcx = gx1 + gw*0.5;
           gcy = gy1 + gh*0.5;
 
-          px1 = gt_boxes[imid][gtid][0];
-          py1 = gt_boxes[imid][gtid][1];
-          px2 = gt_boxes[imid][gtid][2];
-          py2 = gt_boxes[imid][gtid][3];
+          px1 = rois[baseid][1];
+          py1 = rois[baseid][2];
+          px2 = rois[baseid][3];
+          py2 = rois[baseid][4];
 
           pw = px2 - px1 + 1;
           ph = py2 - py1 + 1;
@@ -502,6 +503,8 @@ class MultiProposalTargetOp : public Operator{
     delete [] im_info;
     delete [] valid_ranges;
     delete [] proposals;
+    //t = clock() - t;
+    //printf ("It took me %d clicks (%f seconds).\n",t,((float)t)/CLOCKS_PER_SEC);
   }
 
   virtual void Backward(const OpContext &ctx,
