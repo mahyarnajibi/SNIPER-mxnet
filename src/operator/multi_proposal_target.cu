@@ -246,8 +246,29 @@ inline void NonMaximumSuppression(float* dets,
 template<typename xpu>
 class MultiProposalTargetGPUOp : public Operator{
  public:
+ 	float *scores;
+ 	float *bbox_deltas;
+ 	float *proposals;
+ 	float *im_info;
+ 	float *gt_boxes;
+ 	float *valid_ranges;
+ 	float *rois;
+ 	float *labels;
+ 	float *bbox_targets;
+ 	float *bbox_weights;
+
   explicit MultiProposalTargetGPUOp(MultiProposalTargetParam param) {
     this->param_ = param;
+    this->scores = new float[16*21*2*32*32];
+    this->bbox_deltas = new float[16*21*4*32*32];
+    this->proposals = new float[16*21*5*32*32];
+    this->im_info = new float[16*3];
+    this->gt_boxes = new float[16*100*5];
+    this->valid_ranges = new float[16*2];
+    this->rois = new float[300*16*5];
+    this->labels = new float[300*16];
+    this->bbox_targets = new float[300*16*4];
+    this->bbox_weights = new float[300*16*4];
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -275,16 +296,11 @@ class MultiProposalTargetGPUOp : public Operator{
     int count_anchors = num_anchors*height*width;
     int total_anchors = count_anchors * num_images;
 
-    float *scores = new float[total_anchors*2];
+    /*float *scores = new float[total_anchors*2];
     float *bbox_deltas = new float[total_anchors*4];
     float *im_info = new float[num_images*3];
     float *gt_boxes = new float[100*5*num_images];
     float *valid_ranges = new float[num_images*2];
-    cudaMemcpy(scores, tscores.dptr_, total_anchors*2*sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(bbox_deltas, tbbox_deltas.dptr_, total_anchors*4*sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(im_info, tim_info.dptr_, 3 * sizeof(float) * num_images, cudaMemcpyDeviceToHost);
-    cudaMemcpy(gt_boxes, tgt_boxes.dptr_, 5 * sizeof(float) * num_images * 100, cudaMemcpyDeviceToHost);
-    cudaMemcpy(valid_ranges, tvalid_ranges.dptr_, 2 * sizeof(float) * num_images, cudaMemcpyDeviceToHost);
     
     
     float* rois = new float[num_images*300*5];
@@ -292,7 +308,14 @@ class MultiProposalTargetGPUOp : public Operator{
     float* bbox_targets = new float[num_images*300*4];
     float* bbox_weights = new float [num_images*300*4];
 
-    float *proposals = new float[total_anchors*5];
+    float *proposals = new float[total_anchors*5];*/
+
+    cudaMemcpy(scores, tscores.dptr_, total_anchors*2*sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(bbox_deltas, tbbox_deltas.dptr_, total_anchors*4*sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(im_info, tim_info.dptr_, 3 * sizeof(float) * num_images, cudaMemcpyDeviceToHost);
+    cudaMemcpy(gt_boxes, tgt_boxes.dptr_, 5 * sizeof(float) * num_images * 100, cudaMemcpyDeviceToHost);
+    cudaMemcpy(valid_ranges, tvalid_ranges.dptr_, 2 * sizeof(float) * num_images, cudaMemcpyDeviceToHost);
+    
 
     std::vector<float> base_anchor(4);
     //usleep(20000000);
@@ -520,7 +543,7 @@ class MultiProposalTargetGPUOp : public Operator{
     cudaMemcpy(obbox_targets.dptr_, bbox_targets, 4*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
     cudaMemcpy(obbox_weights.dptr_, bbox_weights, 4*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
     
-    delete [] proposals;
+    /*delete [] proposals;
 
     delete [] scores;    
     delete [] bbox_deltas;
@@ -531,7 +554,7 @@ class MultiProposalTargetGPUOp : public Operator{
     delete [] rois;
     delete [] labels;
     delete [] bbox_targets;
-    delete [] bbox_weights;
+    delete [] bbox_weights;*/
      //t = clock() - t;
   	//printf ("It took me %d clicks (%f seconds).\n",t,((float)t)/CLOCKS_PER_SEC);
   }
@@ -568,7 +591,7 @@ class MultiProposalTargetGPUOp : public Operator{
 
 template<>
 Operator *CreateOp<gpu>(MultiProposalTargetParam param) {
-  return new MultiProposalTargetGPUOp<cpu>(param);
+  return new MultiProposalTargetGPUOp<gpu>(param);
 }
 
 
