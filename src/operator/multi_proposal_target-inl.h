@@ -57,6 +57,8 @@ struct MultiProposalTargetParam : public dmlc::Parameter<MultiProposalTargetPara
   int rpn_post_nms_top_n;
   float threshold;
   int rpn_min_size;
+  int batch_size;
+  float bbox_scale;
   nnvm::Tuple<float> scales;
   nnvm::Tuple<float> ratios;
   int feature_stride;
@@ -69,9 +71,13 @@ struct MultiProposalTargetParam : public dmlc::Parameter<MultiProposalTargetPara
               "suppresion(suppress boxes with IoU >= this threshold");
     DMLC_DECLARE_FIELD(threshold).set_default(0.7)
     .describe("NMS value, below which to suppress.");
+    DMLC_DECLARE_FIELD(batch_size).set_default(16)
+    .describe("batch size");
+    DMLC_DECLARE_FIELD(bbox_scale).set_default(1)
+    .describe("Scale BBox Target");
     DMLC_DECLARE_FIELD(rpn_min_size).set_default(4)
     .describe("Minimum height or width in proposal");
-    tmp[0] = 2.0f; tmp[1] = 4.0f; tmp[2] = 7.0f; tmp[3] = 10.0f; tmp[4] = 13.0f; tmp[5] = 16.0f; tmp[6] = 32.0f;
+    tmp[0] = 2.0f; tmp[1] = 4.0f; tmp[2] = 7.0f; tmp[3] = 10.0f; tmp[4] = 13.0f; tmp[5] = 16.0f; tmp[6] = 24.0f;
     DMLC_DECLARE_FIELD(scales).set_default(nnvm::Tuple<float>(tmp, tmp + 7))
     .describe("Used to generate anchor windows by enumerating scales");
     tmp[0] = 0.5f; tmp[1] = 1.0f; tmp[2] = 2.0f;

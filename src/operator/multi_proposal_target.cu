@@ -39,6 +39,7 @@
 #include "./operator_common.h"
 #include "./mshadow_op.h"
 #include <time.h>
+#include <stdlib.h> 
 
 //============================
 // Bounding Box Transform Utils
@@ -259,16 +260,17 @@ class MultiProposalTargetGPUOp : public Operator{
 
   explicit MultiProposalTargetGPUOp(MultiProposalTargetParam param) {
     this->param_ = param;
-    this->scores = new float[16*21*2*32*32];
-    this->bbox_deltas = new float[16*21*4*32*32];
-    this->proposals = new float[16*21*5*32*32];
-    this->im_info = new float[16*3];
-    this->gt_boxes = new float[16*100*5];
-    this->valid_ranges = new float[16*2];
-    this->rois = new float[300*16*5];
-    this->labels = new float[300*16];
-    this->bbox_targets = new float[300*16*4];
-    this->bbox_weights = new float[300*16*4];
+    int batch_size = param.batch_size;
+    this->scores = new float[batch_size*21*2*32*32];
+    this->bbox_deltas = new float[batch_size*21*4*32*32];
+    this->proposals = new float[batch_size*21*5*32*32];
+    this->im_info = new float[batch_size*3];
+    this->gt_boxes = new float[batch_size*100*5];
+    this->valid_ranges = new float[batch_size*2];
+    this->rois = new float[300*batch_size*5];
+    this->labels = new float[300*batch_size];
+    this->bbox_targets = new float[300*batch_size*4];
+    this->bbox_weights = new float[300*batch_size*4];
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -373,10 +375,10 @@ class MultiProposalTargetGPUOp : public Operator{
       for (int j = numpropsi; j < rpn_post_nms_top_n; j++) {
         int base = (i*rpn_post_nms_top_n + j);
         rois[5*base+0] = i;
-        rois[5*base+1] = 0;
-        rois[5*base+2] = 0;
-        rois[5*base+3] = 100;
-        rois[5*base+4] = 100; 
+        rois[5*base+1] = rand() % 100;
+        rois[5*base+2] = rand() % 100;
+        rois[5*base+3] = 200 + rand() % 200;
+        rois[5*base+4] = 200 + rand() % 200;
       }
 
     }
@@ -416,7 +418,7 @@ class MultiProposalTargetGPUOp : public Operator{
         bbox_weights[4*basepos + 2] = 0.0;
         bbox_weights[4*basepos + 3] = 0.0;
       }
-      int props_this_batch = keep_images[i].size();
+      int props_this_batch = rpn_post_nms_top_n;
 
       for (int k = props_this_batch - numgts_per_image[i], j = 0; k < props_this_batch; j++, k++) {
           float w = gt_boxes[i*100*5 + j*5 + 2] - gt_boxes[i*500 + j*5];
@@ -436,7 +438,7 @@ class MultiProposalTargetGPUOp : public Operator{
       int tpct = 0;
       int num_gts_this_image = numgts_per_image[imid];
       //std::cout << "gtc " << num_gts_this_image << std::endl;
-      int props_this_batch = keep_images[imid].size();
+      int props_this_batch = rpn_post_nms_top_n;
       if (num_gts_this_image > 0) {
       	float *overlaps = new float[props_this_batch * num_gts_this_image];
         float *max_overlaps = new float[props_this_batch];
@@ -518,10 +520,10 @@ class MultiProposalTargetGPUOp : public Operator{
           pcx = px1 + (pw-1)*0.5;
           pcy = py1 + (ph-1)*0.5;
 
-          bbox_targets[baseid*4] = (gcx - pcx) / (pw + 1e-7);
-          bbox_targets[baseid*4 + 1] = (gcy - pcy) / (ph + 1e-7);
-          bbox_targets[baseid*4 + 2] = log(gw/(pw + 1e-7));
-          bbox_targets[baseid*4 + 3] = log(gh/(ph + 1e-7));
+          bbox_targets[4*baseid] = param_.bbox_scale * 10 * (gcx - pcx) / (pw + 1e-7);
+          bbox_targets[4*baseid+1] = param_.bbox_scale * 10 * (gcy - pcy) / (ph + 1e-7);
+          bbox_targets[4*baseid+2] = param_.bbox_scale * 5 * log(gw/(pw + 1e-7));
+          bbox_targets[4*baseid+3] = param_.bbox_scale * 5 * log(gh/(ph + 1e-7));
         }
         //std::cout << tpct << std::endl;
         delete [] max_overlap_ids;

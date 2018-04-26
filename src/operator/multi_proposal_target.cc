@@ -386,7 +386,7 @@ class MultiProposalTargetOp : public Operator{
         bbox_weights[basepos][2] = 0.0;
         bbox_weights[basepos][3] = 0.0;
       }
-      int props_this_batch = keep_images[i].size();
+      int props_this_batch = rpn_post_nms_top_n;
 
       for (int k = props_this_batch - numgts_per_image[i], j = 0; k < props_this_batch; j++, k++) {
           float w = gt_boxes[i][j][2] - gt_boxes[i][j][0];
@@ -406,7 +406,7 @@ class MultiProposalTargetOp : public Operator{
       int tpct = 0;
       int num_gts_this_image = numgts_per_image[imid];
       //std::cout << "gtc " << num_gts_this_image << std::endl;
-      int props_this_batch = keep_images[imid].size();
+      int props_this_batch = rpn_post_nms_top_n;
       if (num_gts_this_image > 0) {
       	float *overlaps = new float[props_this_batch * num_gts_this_image];
         float *max_overlaps = new float[props_this_batch];
@@ -488,10 +488,10 @@ class MultiProposalTargetOp : public Operator{
           pcx = px1 + (pw-1)*0.5;
           pcy = py1 + (ph-1)*0.5;
 
-          bbox_targets[baseid][0] = (gcx - pcx) / (pw + 1e-7);
-          bbox_targets[baseid][1] = (gcy - pcy) / (ph + 1e-7);
-          bbox_targets[baseid][2] = log(gw/(pw + 1e-7));
-          bbox_targets[baseid][3] = log(gh/(ph + 1e-7));
+          bbox_targets[baseid][0] = param_.bbox_scale * 5 * (gcx - pcx) / (pw + 1e-7);
+          bbox_targets[baseid][1] = param_.bbox_scale * 5 * (gcy - pcy) / (ph + 1e-7);
+          bbox_targets[baseid][2] = param_.bbox_scale * 10 * log(gw/(pw + 1e-7));
+          bbox_targets[baseid][3] = param_.bbox_scale * 10 * log(gh/(ph + 1e-7));
         }
         //std::cout << tpct << std::endl;
         delete [] max_overlap_ids;
