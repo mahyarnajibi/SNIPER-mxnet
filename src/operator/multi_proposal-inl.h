@@ -153,7 +153,7 @@ class MultiProposalProp : public OperatorProperty {
   }
 
   std::vector<std::string> ListOutputs() const override {
-    return {"rois"};
+    return {"output"};
   }
 
   Operator* CreateOperator(Context ctx) const override;
