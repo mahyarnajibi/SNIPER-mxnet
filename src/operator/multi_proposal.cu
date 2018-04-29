@@ -247,6 +247,8 @@ class MultiProposalGPUOp : public Operator{
  	float *proposals;
  	float *im_info;
  	float *rois;
+  float *out_scores;
+
 
   explicit MultiProposalGPUOp(MultiProposalParam param) {
     this->param_ = param;
@@ -256,6 +258,7 @@ class MultiProposalGPUOp : public Operator{
     this->proposals = new float[batch_size*21*5*200*200];
     this->im_info = new float[batch_size*3];
     this->rois = new float[param.rpn_post_nms_top_n * batch_size * 5];
+    this->out_scores = new float[param.rpn_post_nms_top_n*batch_size];
   }
 
   ~MultiProposalGPUOp() {
@@ -264,6 +267,7 @@ class MultiProposalGPUOp : public Operator{
     delete [] this->proposals;
     delete [] this->im_info;
     delete [] this->rois;
+    delete [] this->out_scores;
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -272,7 +276,7 @@ class MultiProposalGPUOp : public Operator{
                        const std::vector<TBlob> &out_data,
                        const std::vector<TBlob> &aux_states) {
     CHECK_EQ(in_data.size(), 3);
-    CHECK_EQ(out_data.size(), 1);
+    CHECK_EQ(out_data.size(), 2);
     
     using namespace mshadow;
     using namespace mshadow::expr;
@@ -324,7 +328,7 @@ class MultiProposalGPUOp : public Operator{
       proposals[5*t + 4] = scores[b*count_anchors*2 + ((num_anchors + i)*height + j)*width + k];
     }
 
-    utils::BBoxTransformInv(proposals, bbox_deltas, im_info, num_images, num_anchors, width, height);
+    utils::BBoxTransformInv(proposals, bbox_deltas, im_info, num_images, num_anchors, height, width);
 
     utils::FilterBox(proposals, total_anchors, 3);
 
@@ -346,6 +350,7 @@ class MultiProposalGPUOp : public Operator{
         rois[5*base+2] = proposals[5*keep_images[i][j] + 1];
         rois[5*base+3] = proposals[5*keep_images[i][j] + 2];
         rois[5*base+4] = proposals[5*keep_images[i][j] + 3];
+        out_scores[base] = proposals[5*keep_images[i][j] + 4];
       }
 
       for (int j = numpropsi; j < rpn_post_nms_top_n; j++) {
@@ -355,13 +360,17 @@ class MultiProposalGPUOp : public Operator{
         rois[5*base+2] = rand() % 100;
         rois[5*base+3] = 200 + rand() % 200;
         rois[5*base+4] = 200 + rand() % 200;
+        out_scores[base] = 0.0;
       }
 
     }
 
-    Stream<gpu> *so = ctx.get_stream<gpu>();    
+    Stream<gpu> *so = ctx.get_stream<gpu>();
+    Tensor<gpu,1> oscores = out_data[proposal::kScores].get<gpu, 1, real_t>(so);    
     Tensor<gpu, 2> orois = out_data[proposal::kRoIs].get<gpu, 2, real_t>(so);
-    cudaMemcpy(orois.dptr_, rois, 5*sizeof(float) * num_images * rpn_post_nms_top_n, cudaMemcpyHostToDevice);    
+    cudaMemcpy(orois.dptr_, rois, 5*sizeof(float) * num_images * rpn_post_nms_top_n, cudaMemcpyHostToDevice);
+    cudaMemcpy(oscores.dptr_, out_scores, sizeof(float) * num_images * rpn_post_nms_top_n, cudaMemcpyHostToDevice);  
+
   }
 
   virtual void Backward(const OpContext &ctx,
