@@ -129,7 +129,7 @@ __global__ void NonMaximumSuppression(float* dets,
   int chip_index = i*chip_anchors;
 
   int vct = 0;
-  //num_threads is set to 128
+
   __shared__ float maxbuf[NUM_THREADS_NMS];
   __shared__ int maxidbuf[NUM_THREADS_NMS];
   __shared__ float maxvbuf[32];
