@@ -243,7 +243,7 @@ class MultiProposalOp : public Operator{
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(in_data.size(), 3);
-    CHECK_EQ(out_data.size(), 1);
+    CHECK_EQ(out_data.size(), 2);
     //clock_t t;
     //t = clock();
     //std::cout << "quack 1" << std::endl;
@@ -253,6 +253,7 @@ class MultiProposalOp : public Operator{
     Tensor<cpu, 2> tim_info = in_data[proposal::kImInfo].get<cpu, 2, real_t>(s);
 
     Tensor<cpu, 2> rois = out_data[proposal::kRoIs].get<cpu, 2, real_t>(s);
+    Tensor<cpu, 1> out_scores = out_data[proposal::kScores].get<cpu, 1, real_t>(s);
 
     int num_images = tbbox_deltas.size(0);
     int num_anchors = tbbox_deltas.size(1) / 4;
@@ -326,6 +327,7 @@ class MultiProposalOp : public Operator{
         rois[base][2] = proposals[5*keep_images[i][j] + 1];
         rois[base][3] = proposals[5*keep_images[i][j] + 2];
         rois[base][4] = proposals[5*keep_images[i][j] + 3];
+        out_scores[base] = proposals[keep_images[i][j] + 4];
       }
 
       for (int j = numpropsi; j < rpn_post_nms_top_n; j++) {
@@ -334,7 +336,8 @@ class MultiProposalOp : public Operator{
         rois[base][1] = 0;
         rois[base][2] = 0;
         rois[base][3] = 100;
-        rois[base][4] = 100; 
+        rois[base][4] = 100;
+        out_scores[base] = 0;
       }
 
     }

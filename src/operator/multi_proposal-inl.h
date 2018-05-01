@@ -48,7 +48,7 @@ namespace op {
 
 namespace proposal {
 enum MultiProposalOpInputs {kClsProb, kBBoxPred, kImInfo};
-enum MultiProposalOpOutputs {kRoIs};
+enum MultiProposalOpOutputs {kRoIs, kScores};
 enum MultiProposalForwardResource {kTempResource};
 }  // proposal
 
@@ -115,6 +115,7 @@ class MultiProposalProp : public OperatorProperty {
     out_shape->clear();
     // output
     out_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 5));
+    out_shape->push_back(Shape1(dshape[0] * param_.rpn_post_nms_top_n));
     return true;
   }
 
@@ -141,11 +142,11 @@ class MultiProposalProp : public OperatorProperty {
   }
 
   int NumVisibleOutputs() const override {
-    return 1;
+    return 2;
   }
 
   int NumOutputs() const override {
-    return 1;
+    return 2;
   }
 
   std::vector<std::string> ListArguments() const override {
@@ -153,7 +154,7 @@ class MultiProposalProp : public OperatorProperty {
   }
 
   std::vector<std::string> ListOutputs() const override {
-    return {"rois"};
+    return {"output", "score"};
   }
 
   Operator* CreateOperator(Context ctx) const override;
