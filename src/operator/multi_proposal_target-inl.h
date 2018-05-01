@@ -49,7 +49,7 @@ namespace op {
 namespace proposal {
 enum MultiProposalTargetOpInputs {kClsProb, kBBoxPred, kImInfo, kGTBoxes, kValidRanges};
 enum MultiProposalTargetOpOutputs {kRoIs, kLabels, kBboxTarget, kBboxWeight};
-enum MultiProposalTargetForwardResource {kTempResource};
+enum MultiProposalTargetForwardResource {kTempSpace};
 }  // proposal
 
 struct MultiProposalTargetParam : public dmlc::Parameter<MultiProposalTargetParam> {
@@ -59,6 +59,7 @@ struct MultiProposalTargetParam : public dmlc::Parameter<MultiProposalTargetPara
   int rpn_min_size;
   int batch_size;
   float bbox_scale;
+  uint64_t workspace;
   nnvm::Tuple<float> scales;
   nnvm::Tuple<float> ratios;
   int feature_stride;
@@ -86,6 +87,8 @@ struct MultiProposalTargetParam : public dmlc::Parameter<MultiProposalTargetPara
     DMLC_DECLARE_FIELD(feature_stride).set_default(16)
     .describe("The size of the receptive field each unit in the convolution layer of the rpn,"
               "for example the product of all stride's prior to this layer.");
+    DMLC_DECLARE_FIELD(workspace).set_default(128).set_range(0, 8192)
+      .describe("Maximum temperal workspace allowed for kTempResource");
   }
 };
 
@@ -111,6 +114,10 @@ class MultiProposalTargetProp : public OperatorProperty {
     const TShape &dshape = in_shape->at(proposal::kClsProb);
     if (dshape.ndim() == 0) return false;
 
+    aux_shape->clear();
+    aux_shape->push_back(Shape2(dshape[0] * 21*32*32, 6));
+    aux_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 5));    
+    aux_shape->push_back(Shape2(21, 4));
 
     out_shape->clear();
     // output
@@ -162,6 +169,7 @@ class MultiProposalTargetProp : public OperatorProperty {
     return {"rois", "label", "bbox_target", "bbox_weight"};
   }
 
+
   Operator* CreateOperator(Context ctx) const override;
 
  private:
@@ -173,3 +181,4 @@ class MultiProposalTargetProp : public OperatorProperty {
 }  // namespace mxnet
 
 #endif  //  MXNET_OPERATOR_MULTI_PROPOSAL_INL_H_
+

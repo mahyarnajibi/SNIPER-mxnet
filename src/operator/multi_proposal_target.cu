@@ -22,6 +22,7 @@
  * Licensed under The Apache-2.0 License [see LICENSE for details]
  * \file multi_proposal_target.cc
  * \brief Proposal target layer
+ * \author Bharat Singh
 */
 
 #include "./multi_proposal_target-inl.h"
@@ -40,60 +41,17 @@
 #include "./mshadow_op.h"
 #include <time.h>
 #include <stdlib.h> 
-
 //============================
 // Bounding Box Transform Utils
 //============================
+
+#define NUM_THREADS_NMS 1024
+
 namespace mxnet {
 namespace op {
 namespace utils {
 
-inline void BBoxTransformInv(float* boxes,
-                             float* deltas,
-                             float* im_info,
-                             int num_images,
-                             int anchors,
-                             int heights,
-                             int widths) {
-  int num_anchors = anchors * heights * widths;
-  //usleep(20000000);
-  #pragma omp parallel for num_threads(8)
-  for (int t = 0; t < num_images * num_anchors; ++t) {
-    int b = t / num_anchors;
-    int index = t % num_anchors;
-    int a = index / (heights*widths);
-    int mat = index % (heights*widths);
-    int w = mat % widths; //width index
-    int h = mat / widths; //height index
-    float width = boxes[5*t + 2] - boxes[5*t] + 1.0;
-    float height = boxes[5*t + 3] - boxes[5*t + 1] + 1.0;
-    float ctr_x = boxes[5*t + 0] + 0.5 * (width - 1.0);
-    float ctr_y = boxes[5*t + 1] + 0.5 * (height - 1.0);
-    float dx = deltas[b*num_anchors*4 + a*4*widths*heights + h*widths + w];
-    float dy = deltas[b*num_anchors*4 + (a*4 + 1)*widths*heights + h*widths + w];
-    float dw = deltas[b*num_anchors*4 + (a*4 + 2)*widths*heights + h*widths + w];
-    float dh = deltas[b*num_anchors*4 + (a*4 + 3)*widths*heights + h*widths + w];
-    float pred_ctr_x = dx * width + ctr_x;
-    float pred_ctr_y = dy * height + ctr_y;
-    float pred_w = exp(dw) * width;
-    float pred_h = exp(dh) * height;
 
-    float pred_x1 = pred_ctr_x - 0.5 * (pred_w - 1.0);
-    float pred_y1 = pred_ctr_y - 0.5 * (pred_h - 1.0);
-    float pred_x2 = pred_ctr_x + 0.5 * (pred_w - 1.0);
-    float pred_y2 = pred_ctr_y + 0.5 * (pred_h - 1.0);
-
-    pred_x1 = std::max(std::min(pred_x1, im_info[3*b+1] - 1.0f), 0.0f);
-    pred_y1 = std::max(std::min(pred_y1, im_info[3*b] - 1.0f), 0.0f);
-    pred_x2 = std::max(std::min(pred_x2, im_info[3*b+1] - 1.0f), 0.0f);
-    pred_y2 = std::max(std::min(pred_y2, im_info[3*b] - 1.0f), 0.0f);
-
-    boxes[5*t] = pred_x1;
-    boxes[5*t + 1] = pred_y1;
-    boxes[5*t + 2] = pred_x2;
-    boxes[5*t + 3] = pred_y2;
-  }
-}
 
 // filter box by set confidence to zero
 // * height or width < rpn_min_size
@@ -155,90 +113,221 @@ inline void GenerateAnchors(const std::vector<float>& base_anchor,
   }
 }
 
-// greedily keep the max detections (already sorted)
-inline void NonMaximumSuppression(float* dets,
+// greedily keep the max detections
+__global__ void NonMaximumSuppression(float* dets,
                                   int post_nms_top_n,
                                   int num_images,
                                   int num_anchors,
                                   int width,
                                   int height,
-                                  float* ranges,
-                                  std::vector< std::vector<int> > & final_keep_images) {
+                                  float* propsout) {
   
-  int total_anchors = num_images*num_anchors*width*height;
+  int i = blockIdx.x;
+  int t = threadIdx.x;
   int chip_anchors = num_anchors*width*height;
-  
-  float *area = new float[total_anchors];
+  int num_threads = blockDim.x;
+  int chip_index = i*chip_anchors;
 
-  #pragma omp parallel for num_threads(8)
-  for (int i = 0; i < total_anchors; ++i) {
-    area[i] = (dets[5*i + 2] - dets[5*i + 0] + 1) * (dets[5*i + 3] - dets[5*i + 1] + 1);
-    int imid = i/chip_anchors;
-    if (area[i] > ranges[2*imid + 1]*ranges[2*imid + 1] || area[i] < ranges[2*imid]*ranges[2*imid]) {
-      dets[5*i + 4] = -1;
-    }
-  }
+  int vct = 0;
+  //num_threads is set to 128
+  __shared__ float maxbuf[NUM_THREADS_NMS];
+  __shared__ int maxidbuf[NUM_THREADS_NMS];
+  __shared__ float maxvbuf[32];
+  __shared__ int maxidvbuf[32];
+  __shared__ float boxbuf[6];
 
-  int max_nms = 6000;
-  #pragma omp parallel for num_threads(8)
-  for (int i = 0; i < num_images; i++) {
-    std::vector <float> sortids(chip_anchors);
-    for (int j = 0; j < chip_anchors; j++) {
-      sortids[j] = j;
-    }
-    int chip_index = i*chip_anchors;
-    std::sort(sortids.begin(), sortids.end(), 
-        [&dets,chip_index](int i1, int i2) {
-          return dets[5*(chip_index + i1) + 4] > dets[5*(chip_index + i2) + 4];
-        });
-    float *dbuf = new float[6*max_nms];
-
-    //reorder for spatial locality in CPU, yo!
-    for (int j = 0; j < max_nms; j++) {
-      int index = i*chip_anchors + sortids[j];
-      dbuf[6*j] = dets[5*index];
-      dbuf[6*j+1] = dets[5*index+1];
-      dbuf[6*j+2] = dets[5*index+2];
-      dbuf[6*j+3] = dets[5*index+3];
-      dbuf[6*j+4] = dets[5*index+4];
-      dbuf[6*j+5] = area[index];
-    }
-
-    int vct = 0;
-    for (int j = 0; j < max_nms && vct < post_nms_top_n; j++) {
-      int index = i*chip_anchors + sortids[j];
-      float ix1 = dbuf[6*j];
-      float iy1 = dbuf[6*j+1];
-      float ix2 = dbuf[6*j+2];
-      float iy2 = dbuf[6*j+3];
-      float iarea = dbuf[6*j+5];
-
-      if (dbuf[6*j+4] == -1) {
-        continue;
+  for (int j = chip_index; j < chip_index + chip_anchors && vct < post_nms_top_n; j++) {
+    //find max
+    float vmax = -2;
+    int maxid = j + t;
+    for (int k = j + t; k < chip_index + chip_anchors; k = k + num_threads) {
+      if (dets[6*k + 4] > vmax) {
+        vmax = dets[6*k + 4];
+        maxid = k;
       }
+    }
+    maxbuf[t] = vmax;
+    maxidbuf[t] = maxid;
+    __syncthreads();
 
-      final_keep_images[i].push_back(index);
-      vct = vct + 1;
-      for (int pind = j + 1; pind < max_nms; pind++) {
-        if (dbuf[6*pind + 4] == -1) {
-          continue;
-        } 
-        float xx1 = std::max(ix1, dbuf[6*pind]);
-        float yy1 = std::max(iy1, dbuf[6*pind + 1]);
-        float xx2 = std::min(ix2, dbuf[6*pind + 2]);
-        float yy2 = std::min(iy2, dbuf[6*pind + 3]);
-        float w = std::max(0.0f, xx2 - xx1 + 1.0f);
-        float h = std::max(0.0f, yy2 - yy1 + 1.0f);
-        float inter = w * h;
-        float ovr = inter / (iarea + dbuf[6*pind+5] - inter);
-        if (ovr > 0.7) {
-          dbuf[6*pind + 4] = -1;
+    if (t < 32) {
+      float vmax = maxbuf[0];
+      int maxid = maxidbuf[0];
+      for (int k = t; k < NUM_THREADS_NMS; k = k + 32) {
+        if (maxbuf[k] > vmax) {
+          vmax = maxbuf[k];
+          maxid = maxidbuf[k];
         }
       }
+      maxvbuf[t] = vmax;
+      maxidvbuf[t] = maxid;
     }
-    delete [] dbuf;
+    __syncthreads();
+
+    int basep = chip_index + vct;
+
+    if (t == 0) {
+      vmax = maxvbuf[0];
+      maxid = maxidvbuf[0];
+      for (int k = 0; k < 32; k++) {
+        if (maxvbuf[k] > vmax) {
+          vmax = maxvbuf[k];
+          maxid = maxidvbuf[k];
+        }
+      }
+      //swap it with the kth element
+      float tmpx1, tmpx2, tmpy1, tmpy2, tmps, tmpa;
+      
+      tmpx1 = dets[6*basep];
+      tmpy1 = dets[6*basep+1];
+      tmpx2 = dets[6*basep+2];
+      tmpy2 = dets[6*basep+3];
+      tmps = dets[6*basep+4];
+      tmpa = dets[6*basep+5];
+
+      dets[6*basep] = dets[6*maxid];
+      dets[6*basep+1] = dets[6*maxid+1];
+      dets[6*basep+2] = dets[6*maxid+2];
+      dets[6*basep+3] = dets[6*maxid+3];
+      dets[6*basep+4] = dets[6*maxid+4];
+      dets[6*basep+5] = dets[6*maxid+5];
+
+      dets[6*maxid] = tmpx1;
+      dets[6*maxid+1] = tmpy1;
+      dets[6*maxid+2] = tmpx2;
+      dets[6*maxid+3] = tmpy2;
+      dets[6*maxid+4] = tmps;
+      dets[6*maxid+5] = tmpa;
+
+      boxbuf[0] = dets[6*basep];
+      boxbuf[1] = dets[6*basep+1];
+      boxbuf[2] = dets[6*basep+2];
+      boxbuf[3] = dets[6*basep+3];
+      boxbuf[4] = dets[6*basep+4];
+      boxbuf[5] = dets[6*basep+5];
+    }
+    __syncthreads();
+      
+    //invalidate all boxes with overlap > 0.7 with max box
+
+    float ix1 = boxbuf[0];
+    float iy1 = boxbuf[1];
+    float ix2 = boxbuf[2];
+    float iy2 = boxbuf[3];
+    float iarea = boxbuf[5];
+
+    if (boxbuf[4] == -1) {
+      break;
+    }
+
+    vct = vct + 1;
+    float xx1, xx2, yy1, yy2, w, h, inter, ovr;
+    for (int pind = j + 1 + t; pind < chip_index + chip_anchors; pind = pind + num_threads) {
+      if (dets[6*pind + 4] == -1) {
+        continue;
+      } 
+      xx1 = fmaxf(ix1, dets[6*pind]);
+      yy1 = fmaxf(iy1, dets[6*pind + 1]);
+      xx2 = fminf(ix2, dets[6*pind + 2]);
+      yy2 = fminf(iy2, dets[6*pind + 3]);
+      w = fmaxf(0.0f, xx2 - xx1 + 1.0f);
+      h = fmaxf(0.0f, yy2 - yy1 + 1.0f);
+      inter = w * h;
+      ovr = inter / (iarea + dets[6*pind+5] - inter);
+      if (ovr > 0.7) {
+        dets[6*pind + 4] = -1;
+      }
+    }
+    __syncthreads();
   }
-  delete [] area;
+
+  for (int k = chip_index + vct + t; k < chip_index + post_nms_top_n; k = k + num_threads) {
+    dets[6*k] = k % 100;
+    dets[6*k + 1] = k% 100;
+    dets[6*k + 2] = k % 100 + 200;
+    dets[6*k + 3] = k % 100 + 200;
+  }
+  __syncthreads();
+
+  if (t < post_nms_top_n) {
+    propsout[5*(i*post_nms_top_n + t)] = i;
+    propsout[5*(i*post_nms_top_n + t) + 1] = dets[6*(chip_index + t)];
+    propsout[5*(i*post_nms_top_n + t) + 2] = dets[6*(chip_index + t)+1];
+    propsout[5*(i*post_nms_top_n + t) + 3] = dets[6*(chip_index + t)+2];
+    propsout[5*(i*post_nms_top_n + t) + 4] = dets[6*(chip_index + t)+3];
+  }
+  __syncthreads();
+}
+
+
+__global__ void getProps(float* boxes,
+                             float* deltas,
+                             float* im_info,
+                             float* anchorbuf,
+                             float* scores,
+                             float* valid_ranges,
+                             int num_images,
+                             int anchors,
+                             int heights,
+                             int widths,
+                             int stride) {
+  int num_anchors = anchors * heights * widths;
+  int t = blockDim.x * blockIdx.x + threadIdx.x;
+
+  if (t < num_images * num_anchors) {
+    
+    int b = t / num_anchors;
+    int index = t % num_anchors;
+    int a = index / (heights*widths);
+    int mat = index % (heights*widths);
+    int w = mat % widths; //width index
+    int h = mat / widths; //height index
+    boxes[6*t] = anchorbuf[4*a] + w * stride;
+    boxes[6*t + 1] = anchorbuf[4*a+1] + h * stride;
+    boxes[6*t + 2] = anchorbuf[4*a+2] + w * stride;
+    boxes[6*t + 3] = anchorbuf[4*a+3] + h * stride;
+    boxes[6*t + 4] = scores[b*num_anchors*2 + ((anchors + a)*heights + h)*widths + w];
+
+    float width = boxes[6*t + 2] - boxes[6*t] + 1.0;
+    float height = boxes[6*t + 3] - boxes[6*t + 1] + 1.0;
+    float ctr_x = boxes[6*t + 0] + 0.5 * (width - 1.0);
+    float ctr_y = boxes[6*t + 1] + 0.5 * (height - 1.0);
+    float dx = deltas[b*num_anchors*4 + a*4*widths*heights + h*widths + w];
+    float dy = deltas[b*num_anchors*4 + (a*4 + 1)*widths*heights + h*widths + w];
+    float dw = deltas[b*num_anchors*4 + (a*4 + 2)*widths*heights + h*widths + w];
+    float dh = deltas[b*num_anchors*4 + (a*4 + 3)*widths*heights + h*widths + w];
+    float pred_ctr_x = dx * width + ctr_x;
+    float pred_ctr_y = dy * height + ctr_y;
+    float pred_w = exp(dw) * width;
+    float pred_h = exp(dh) * height;
+    float pred_x1 = pred_ctr_x - 0.5 * (pred_w - 1.0);
+    float pred_y1 = pred_ctr_y - 0.5 * (pred_h - 1.0);
+    float pred_x2 = pred_ctr_x + 0.5 * (pred_w - 1.0);
+    float pred_y2 = pred_ctr_y + 0.5 * (pred_h - 1.0);
+
+    pred_x1 = fmaxf(fminf(pred_x1, im_info[3*b+1] - 1.0f), 0.0f);
+    pred_y1 = fmaxf(fminf(pred_y1, im_info[3*b] - 1.0f), 0.0f);
+    pred_x2 = fmaxf(fminf(pred_x2, im_info[3*b+1] - 1.0f), 0.0f);
+    pred_y2 = fmaxf(fminf(pred_y2, im_info[3*b] - 1.0f), 0.0f);
+    boxes[6*t] = pred_x1;
+    boxes[6*t + 1] = pred_y1;
+    boxes[6*t + 2] = pred_x2;
+    boxes[6*t + 3] = pred_y2;
+    
+    int min_size = 3;
+    if ((pred_y2 - pred_y1) < min_size && (pred_x2 - pred_x1) < min_size) {
+      boxes[6*t] -= min_size/2;
+      boxes[6*t + 1] -= min_size/2;
+      boxes[6*t + 2] += min_size/2;
+      boxes[6*t + 3] += min_size/2;
+      boxes[6*t + 4] = -1;
+    }
+    float area = (boxes[6*t + 2] - boxes[6*t]) * (boxes[6*t + 3] - boxes[6*t + 1]);
+    if (area >= valid_ranges[2*b+1] * valid_ranges[2*b+1] || area < valid_ranges[2*b]*valid_ranges[2*b]) {
+      boxes[6*t + 4] = -1;  
+    }
+    boxes[6*t + 5] = area;
+  }
 }
 
 }  // namespace utils
@@ -247,23 +336,19 @@ inline void NonMaximumSuppression(float* dets,
 template<typename xpu>
 class MultiProposalTargetGPUOp : public Operator{
  public:
- 	float *scores;
- 	float *bbox_deltas;
- 	float *proposals;
- 	float *im_info;
- 	float *gt_boxes;
- 	float *valid_ranges;
- 	float *rois;
- 	float *labels;
- 	float *bbox_targets;
- 	float *bbox_weights;
+  float *proposals;
+  float *im_info;
+  float *gt_boxes;
+  float *rois;
+  float *labels;
+  float *bbox_targets;
+  float *bbox_weights;
+  float *valid_ranges;
 
   explicit MultiProposalTargetGPUOp(MultiProposalTargetParam param) {
     this->param_ = param;
-    int batch_size = param.batch_size;
-    this->scores = new float[batch_size*21*2*32*32];
-    this->bbox_deltas = new float[batch_size*21*4*32*32];
-    this->proposals = new float[batch_size*21*5*32*32];
+    int batch_size = 16;//param.batch_size;
+    this->proposals = new float[batch_size*21*6*32*32];
     this->im_info = new float[batch_size*3];
     this->gt_boxes = new float[batch_size*100*5];
     this->valid_ranges = new float[batch_size*2];
@@ -271,6 +356,7 @@ class MultiProposalTargetGPUOp : public Operator{
     this->labels = new float[300*batch_size];
     this->bbox_targets = new float[300*batch_size*4];
     this->bbox_weights = new float[300*batch_size*4];
+    this->param_.workspace = (param_.workspace << 20) / sizeof(float);
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -278,19 +364,22 @@ class MultiProposalTargetGPUOp : public Operator{
                        const std::vector<OpReqType> &req,
                        const std::vector<TBlob> &out_data,
                        const std::vector<TBlob> &aux_states) {
-  	CHECK_EQ(in_data.size(), 5);
+    CHECK_EQ(in_data.size(), 5);
     CHECK_EQ(out_data.size(), 4);
+    
     using namespace mshadow;
     using namespace mshadow::expr;
     //clock_t t;
-  	//t = clock();
+    //t = clock();
     Stream<gpu> *s = ctx.get_stream<gpu>();
+
     Tensor<gpu, 4> tscores = in_data[proposal::kClsProb].get<gpu, 4, real_t>(s);
     Tensor<gpu, 4> tbbox_deltas = in_data[proposal::kBBoxPred].get<gpu, 4, real_t>(s);
     Tensor<gpu, 2> tim_info = in_data[proposal::kImInfo].get<gpu, 2, real_t>(s);
     Tensor<gpu, 3> tgt_boxes = in_data[proposal::kGTBoxes].get<gpu, 3, real_t>(s);
     Tensor<gpu, 2> tvalid_ranges = in_data[proposal::kValidRanges].get<gpu, 2, real_t>(s);
 
+    int rpn_post_nms_top_n = param_.rpn_post_nms_top_n;
     int num_images = tbbox_deltas.size(0);
     int num_anchors = tbbox_deltas.size(1) / 4;
     int height = tbbox_deltas.size(2);
@@ -298,26 +387,16 @@ class MultiProposalTargetGPUOp : public Operator{
     int count_anchors = num_anchors*height*width;
     int total_anchors = count_anchors * num_images;
 
-    /*float *scores = new float[total_anchors*2];
-    float *bbox_deltas = new float[total_anchors*4];
-    float *im_info = new float[num_images*3];
-    float *gt_boxes = new float[100*5*num_images];
-    float *valid_ranges = new float[num_images*2];
-    
-    
-    float* rois = new float[num_images*300*5];
-    float* labels = new float[num_images*300];
-    float* bbox_targets = new float[num_images*300*4];
-    float* bbox_weights = new float [num_images*300*4];
+    int bufsize = (total_anchors*6 + num_images*rpn_post_nms_top_n*5 + num_anchors*4)*sizeof(float);
+    Tensor<gpu, 1> workspace = ctx.requested[proposal::kTempSpace].get_space_typed<gpu, 1, float>(Shape1(bufsize), s);
 
-    float *proposals = new float[total_anchors*5];*/
-
-    cudaMemcpy(scores, tscores.dptr_, total_anchors*2*sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(bbox_deltas, tbbox_deltas.dptr_, total_anchors*4*sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(im_info, tim_info.dptr_, 3 * sizeof(float) * num_images, cudaMemcpyDeviceToHost);
     cudaMemcpy(gt_boxes, tgt_boxes.dptr_, 5 * sizeof(float) * num_images * 100, cudaMemcpyDeviceToHost);
     cudaMemcpy(valid_ranges, tvalid_ranges.dptr_, 2 * sizeof(float) * num_images, cudaMemcpyDeviceToHost);
-    
+
+    float* propbuf = workspace.dptr_;
+    float* propsout = workspace.dptr_ + total_anchors*6;    
+    float* anchorbuf = workspace.dptr_ + total_anchors*6 + num_images*rpn_post_nms_top_n*5;
 
     std::vector<float> base_anchor(4);
     //usleep(20000000);
@@ -331,59 +410,28 @@ class MultiProposalTargetGPUOp : public Operator{
                            param_.ratios,
                            param_.scales,
                            &anchors);
+    unsigned int size = num_anchors*4*sizeof(float);
+    cudaMemcpy(anchorbuf, &anchors[0], size, cudaMemcpyHostToDevice);
 
-    //std::cout << "quack 3" << std::endl;
-    #pragma omp parallel for num_threads(8)
-    for (int t = 0; t < total_anchors; ++t) {
-      int b = t / count_anchors;
-      int index = t % count_anchors;
-      int i = index / (height*width);
-      int mat = t % (height*width);
-      int k = mat % width; //width index
-      int j = mat / width; //height index
-      proposals[5*t] = anchors[4*i] + k * param_.feature_stride;
-      proposals[5*t + 1] = anchors[4*i+1] + j * param_.feature_stride;
-      proposals[5*t + 2] = anchors[4*i+2] + k * param_.feature_stride;
-      proposals[5*t + 3] = anchors[4*i+3] + j * param_.feature_stride;
-      proposals[5*t + 4] = scores[b*count_anchors*2 + ((num_anchors + i)*height + j)*width + k];
-    }
-
-    utils::BBoxTransformInv(proposals, bbox_deltas, im_info, num_images, num_anchors, width, height);
-
-    utils::FilterBox(proposals, total_anchors, 3);
-
-    std::vector <std::vector<int> > keep_images(num_images);
-    for (int i = 0; i < num_images; i++) {
-      keep_images[i] = std::vector<int>(0);
-    }
-    //std::cout << "quack 5" << std::endl;
-    int rpn_post_nms_top_n = param_.rpn_post_nms_top_n;
-    utils::NonMaximumSuppression(proposals, rpn_post_nms_top_n, num_images, num_anchors, width, height, valid_ranges, keep_images);
-    //std::cout << "quack 6" << std::endl;
-    #pragma omp parallel for num_threads(8)
-    for (int i = 0; i < num_images; i++) {
-      int numpropsi = keep_images[i].size();
-      for (int j = 0; j < numpropsi; j++) {
-        int base = (i*rpn_post_nms_top_n + j);
-        rois[5*base] = i;
-        rois[5*base+1] = proposals[5*keep_images[i][j] + 0];
-        rois[5*base+2] = proposals[5*keep_images[i][j] + 1];
-        rois[5*base+3] = proposals[5*keep_images[i][j] + 2];
-        rois[5*base+4] = proposals[5*keep_images[i][j] + 3];
-      }
-
-      for (int j = numpropsi; j < rpn_post_nms_top_n; j++) {
-        int base = (i*rpn_post_nms_top_n + j);
-        rois[5*base+0] = i;
-        rois[5*base+1] = rand() % 100;
-        rois[5*base+2] = rand() % 100;
-        rois[5*base+3] = 200 + rand() % 200;
-        rois[5*base+4] = 200 + rand() % 200;
-      }
-
-    }
-
-    //std::cout << "quack 7" << std::endl;
+    //call cuda kernel
+    int threadsPerBlock = NUM_THREADS_NMS; 
+    int numblocks = (total_anchors/threadsPerBlock) + 1;
+    utils::getProps<<<numblocks, threadsPerBlock>>>(propbuf, tbbox_deltas.dptr_, tim_info.dptr_, anchorbuf, tscores.dptr_,
+                                                    tvalid_ranges.dptr_, num_images, num_anchors, height, width, param_.feature_stride);
+    cudaDeviceSynchronize();
+    
+    utils::NonMaximumSuppression<<<num_images, threadsPerBlock>>>(propbuf, rpn_post_nms_top_n, num_images, num_anchors, width, height, propsout);
+    cudaDeviceSynchronize();
+    cudaError_t error;
+    error = cudaGetLastError();
+    if(error != cudaSuccess)
+  {
+    // print the CUDA error message and exit
+    printf("CUDA error: %s\n", cudaGetErrorString(error));
+    exit(-1);
+  }
+    cudaMemcpy(rois, propsout, 5*rpn_post_nms_top_n*num_images*sizeof(float), cudaMemcpyDeviceToHost);
+    
     std::vector <int> numgts_per_image(num_images);
     std::vector <int> sumgts_per_image(num_images);
 
@@ -401,8 +449,6 @@ class MultiProposalTargetGPUOp : public Operator{
       }
     }
 
-    float xx1, yy1, xx2, yy2, w, h, inter, ovr, a2;
-    //std::cout << "quack 8" << std::endl;
     #pragma omp parallel for num_threads(8)
     for (int i = 0; i < num_images; i++) {
       for (int j = 0; j < rpn_post_nms_top_n; j++) {
@@ -432,7 +478,6 @@ class MultiProposalTargetGPUOp : public Operator{
           }
         }
     }
-
     #pragma omp parallel for num_threads(8)
     for (int imid = 0; imid < num_images; imid++) {
       int tpct = 0;
@@ -440,7 +485,7 @@ class MultiProposalTargetGPUOp : public Operator{
       //std::cout << "gtc " << num_gts_this_image << std::endl;
       int props_this_batch = rpn_post_nms_top_n;
       if (num_gts_this_image > 0) {
-      	float *overlaps = new float[props_this_batch * num_gts_this_image];
+        float *overlaps = new float[props_this_batch * num_gts_this_image];
         float *max_overlaps = new float[props_this_batch];
         for (int i = 0; i < props_this_batch; i++) {
           max_overlaps[i] = 0;
@@ -462,6 +507,7 @@ class MultiProposalTargetGPUOp : public Operator{
           float y2 = gt_boxes[imid*500 + i*5 + 3];
           int pbase;
           float a1 = (x2 - x1) * (y2 - y1);
+          float xx1, yy1, xx2, yy2, w, h, inter, ovr, a2;
           for (int j = 0; j < props_this_batch; j++) {
             pbase = rpn_post_nms_top_n*imid + j;
             xx1 = std::max(x1, rois[pbase*5 + 1]);
@@ -520,45 +566,26 @@ class MultiProposalTargetGPUOp : public Operator{
           pcx = px1 + (pw-1)*0.5;
           pcy = py1 + (ph-1)*0.5;
 
-          bbox_targets[4*baseid] = param_.bbox_scale * 10 * (gcx - pcx) / (pw + 1e-7);
-          bbox_targets[4*baseid+1] = param_.bbox_scale * 10 * (gcy - pcy) / (ph + 1e-7);
-          bbox_targets[4*baseid+2] = param_.bbox_scale * 5 * log(gw/(pw + 1e-7));
-          bbox_targets[4*baseid+3] = param_.bbox_scale * 5 * log(gh/(ph + 1e-7));
+          bbox_targets[4*baseid] =  10 * (gcx - pcx) / (pw + 1e-7);
+          bbox_targets[4*baseid+1] =  10 * (gcy - pcy) / (ph + 1e-7);
+          bbox_targets[4*baseid+2] =  5 * log(gw/(pw + 1e-7));
+          bbox_targets[4*baseid+3] =  5 * log(gh/(ph + 1e-7));
         }
-        //std::cout << tpct << std::endl;
         delete [] max_overlap_ids;
         delete [] overlaps;
         delete [] max_overlaps;
       }      
     }
-    //std::cout << "quack end" << std::endl;
-   
-
-	Stream<gpu> *so = ctx.get_stream<gpu>();    
+    
+    Stream<gpu> *so = ctx.get_stream<gpu>();    
     Tensor<gpu, 2> orois = out_data[proposal::kRoIs].get<gpu, 2, real_t>(so);
     Tensor<gpu, 2> olabels = out_data[proposal::kLabels].get<gpu, 2, real_t>(so);
     Tensor<gpu, 2> obbox_targets = out_data[proposal::kBboxTarget].get<gpu, 2, real_t>(so);
     Tensor<gpu, 2> obbox_weights = out_data[proposal::kBboxWeight].get<gpu, 2, real_t>(so);
-
     cudaMemcpy(orois.dptr_, rois, 5*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
     cudaMemcpy(olabels.dptr_, labels, sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
     cudaMemcpy(obbox_targets.dptr_, bbox_targets, 4*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
-    cudaMemcpy(obbox_weights.dptr_, bbox_weights, 4*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
-    
-    /*delete [] proposals;
-
-    delete [] scores;    
-    delete [] bbox_deltas;
-    delete [] im_info;
-    delete [] gt_boxes;
-    delete [] valid_ranges;
-
-    delete [] rois;
-    delete [] labels;
-    delete [] bbox_targets;
-    delete [] bbox_weights;*/
-     //t = clock() - t;
-  	//printf ("It took me %d clicks (%f seconds).\n",t,((float)t)/CLOCKS_PER_SEC);
+    cudaMemcpy(obbox_weights.dptr_, bbox_weights, 4*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);    
   }
 
   virtual void Backward(const OpContext &ctx,
