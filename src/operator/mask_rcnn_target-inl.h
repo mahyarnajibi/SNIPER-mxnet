@@ -64,7 +64,6 @@ struct MaskRcnnTargetParam : public dmlc::Parameter<MaskRcnnTargetParam> {
   int num_classes;
   int max_output_masks;
   DMLC_DECLARE_PARAMETER(MaskRcnnTargetParam) {
-    float tmp[] = {0, 0, 0, 0, 0, 0, 0};
     DMLC_DECLARE_FIELD(batch_size).set_default(16)
     .describe("batch size");
     DMLC_DECLARE_FIELD(mask_size).set_default(14)

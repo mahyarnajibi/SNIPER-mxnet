@@ -103,7 +103,7 @@ class MaskRcnnTargetGPUOp : public Operator{
 
   explicit MaskRcnnTargetGPUOp(MaskRcnnTargetParam param) {
     this->param_ = param;
-    this->mask_outs = new float[param_.max_output_masks*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes]
+    this->mask_outs = new float[param_.max_output_masks*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes];
   }
 
   virtual void Forward(const OpContext &ctx,
