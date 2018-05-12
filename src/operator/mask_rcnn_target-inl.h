@@ -47,7 +47,7 @@ namespace mxnet {
 namespace op {
 
 namespace mask {
-enum MaskRcnnTargetOpInputs {kRoIs, kImInfo, kGTMasks, kGTBoxes, kValidRanges};
+enum MaskRcnnTargetOpInputs {kRoIs, kMaskBoxes, kMaskPolys, kMaskIds};
 enum MaskRcnnOpOutputs {kMaskTargets};
 enum MaskRcnnTargetForwardResource {kTempSpace};
 }  // end of mask namespace
@@ -57,7 +57,6 @@ struct MaskRcnnTargetParam : public dmlc::Parameter<MaskRcnnTargetParam> {
   int ignore_label;
   int batch_size;
   uint64_t workspace;
-  int feature_stride;
   int num_proposals;
   int max_polygon_len;
   int max_num_gts;
@@ -70,8 +69,6 @@ struct MaskRcnnTargetParam : public dmlc::Parameter<MaskRcnnTargetParam> {
     .describe("Size of the generated mask for each ROI");
     DMLC_DECLARE_FIELD(ignore_label).set_default(-1)
     .describe("Ignore label in output mask");
-    DMLC_DECLARE_FIELD(feature_stride).set_default(16)
-    .describe("The network feature stride prior to this layer");
     DMLC_DECLARE_FIELD(num_proposals).set_default(300)
     .describe("Number of proposals per image");
     DMLC_DECLARE_FIELD(max_polygon_len).set_default(500)
@@ -106,17 +103,13 @@ class MaskRcnnTargetProp : public OperatorProperty {
                   std::vector<TShape> *out_shape,
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
-    CHECK_EQ(in_shape->size(), 5) << "Input:[rois, im_info, gt_masks, gt_boxes, valid_ranges]";
+    CHECK_EQ(in_shape->size(), 4) << "Input:[rois, mask_boxes, mask_polys, mask_ids]";
     const TShape &dshape = in_shape->at(mask::kRoIs);
     if (dshape.ndim() == 0) return false;
 
-    aux_shape->clear();
-    // aux space for output
-    aux_shape->push_back(Shape2(param_.max_output_masks * param_.num_proposals, param_.mask_size * param_.mask_size * param_.num_classes));    
-
     out_shape->clear();
     // output
-    out_shape->push_back(Shape2(param_.max_output_masks * param_.num_proposals, param_.mask_size * param_.mask_size * param_.num_classes));
+    out_shape->push_back(Shape4(param_.batch_size * param_.max_output_masks, param_.num_classes, param_.mask_size, param_.mask_size));
     return true;
   }
 
@@ -151,7 +144,7 @@ class MaskRcnnTargetProp : public OperatorProperty {
   }
 
   std::vector<std::string> ListArguments() const override {
-    return {"cls_prob", "bbox_pred", "im_info", "gt_boxes", "valid_ranges"};
+    return {"rois", "mask_boxes", "mask_polys", "mask_ids"};
   }
 
   std::vector<std::string> ListOutputs() const override {
