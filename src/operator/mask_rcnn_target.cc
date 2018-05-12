@@ -37,52 +37,79 @@ namespace mxnet {
 namespace op {
 namespace mask_utils {
     // Mask Utility Functions
-    inline void getBoxesFromPolys(float* polys, float* out_bboxs){
-     /* !
-     Output the bounding box around each set of polygon which repesent an object
-     *****Inputs****
-     polys: polygons in a given image
-     *****Outputs****
-     out_bboxs: bounding boxes for each object based on polygons
-     */
-    }
-    inline void getBboxOverlaps(float* boxes1, float* boxes2, float* overlaps)
-    {
-     /* !
-     Compute the bounding box overlap between two set of boxes
-     *****Inputs****
-     boxes1: first set of bounding boxes
-     boxes2: second set of bounding boxes
-     *****Outputs****
-     overlap: overlap of each box in boxes1 to each box in boxes2
-     */
-    }
-    inline void convertPoly2Mask(float* roi, float* poly, float* mask)
+    inline void convertPoly2Mask(const float* roi, const float* poly, const int mask_size, float* mask)
     {
      /* !
      Converts a polygon to a pre-defined mask wrt to an roi
      *****Inputs****
-     boxes1: first set of bounding boxes
-     boxes2: second set of bounding boxes
+     roi: The RoI bounding box 
+     poly: The polygon points the pre-defined format(see below)
+     mask_size: The mask size
      *****Outputs****
      overlap: overlap of each box in boxes1 to each box in boxes2
      */
+      float w = roi[3] - roi[1];
+      float h = roi[4] - roi[2];
+      w = std::max((float)1, w);
+      h = std::max((float)1, h);
+      int n_seg = poly[1];
+
+      int offset = 1 + n_seg;
+      RLE* rles;
+      rlesInit(&rles, n_seg);
+      for(int i = 0; i < n_seg; i++){
+        int cur_len = poly[i+1];
+        double* xys = new double[cur_len];
+        for(int j = 0; j < cur_len; j++){
+          if(j % 2 == 0)
+            xys[j] = (poly[offset+j] - roi[1]) * mask_size / w;
+          else
+            xys[j] = (poly[offset+j] - roi[2]) * mask_size / h;
+        }
+        rleFrPoly(rles + i, xys, cur_len/2, mask_size, mask_size);
+        delete [] xys;
+        offset += cur_len;
+      }
+      // Decode RLE to mask
+      byte* byte_mask = new byte[mask_size*mask_size*n_seg];
+      rleDecode(rles, byte_mask, n_seg);
+      // Flatten mask
+      for(int j = 0; j < mask_size*mask_size; j++)
+      {
+        float cur_byte = 0;
+        for(int i = 0; i< n_seg; i++){
+          int offset = i * mask_size * mask_size + j;
+          if(byte_mask[offset]==1){
+            cur_byte = 1;
+            break;
+          }
+        }
+        mask[j] = cur_byte;
+      }
+      
+      // Check to make sure we don't have memory leak
+      rlesFree(&rles, n_seg);
+      delete [] byte_mask;
+
     }
-    inline void expandBinaryMasks2ClassMasks(float* binary_masks, float* classes, float* class_masks)
+    inline void expandBinaryMasks2ClassMasks(const float* binary_mask, const int category, const int mask_size, float* class_masks)
     {
       /* !
      Given binary masks and the classes, copy each into the correct category channel
      *****Inputs****
-     binary_masks: binary masks computed
-     classes: category for the mask
+     binary_mask: binary masks computed
+     category: category for the mask
+     mask_size: mask_size
      *****Outputs****
-     class_mask: output masks which has param_.num_classes channels
+     class_masks: output masks which has param_.num_classes channels
      */
+      int offset = category * mask_size * mask_size;
+      for(int i = 0; i < mask_size * mask_size; i++){
+        class_masks[offset + i] = (binary_mask[i] == 1) ? 1 : 0;
+      }
     }
 
-
-}  // namespace mask_utils
-
+}  // namespace utils
 
 template<typename xpu>
 class MaskRcnnTargetOp : public Operator{
@@ -98,28 +125,47 @@ class MaskRcnnTargetOp : public Operator{
                        const std::vector<TBlob> &aux_states) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), 5);
+    CHECK_EQ(in_data.size(), 4);
     CHECK_EQ(out_data.size(), 1);
 
-    // Getting the inputs
+    usleep(20000000);
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<cpu, 2> rois = in_data[mask::kRoIs].get<cpu, 2, real_t>(s);
-    Tensor<cpu, 2> im_info = in_data[mask::kImInfo].get<cpu, 2, real_t>(s);
-    Tensor<cpu, 2> gt_masks = in_data[mask::kGTMasks].get<cpu, 2, real_t>(s);
-    Tensor<cpu, 3> gt_boxes = in_data[mask::kGTBoxes].get<cpu, 3, real_t>(s);
-    Tensor<cpu, 2> valid_ranges = in_data[mask::kValidRanges].get<cpu, 2, real_t>(s);
+    Tensor<cpu, 3> mask_boxes = in_data[mask::kMaskBoxes].get<cpu, 3, real_t>(s);
+    Tensor<cpu, 3> gt_masks = in_data[mask::kMaskPolys].get<cpu, 3, real_t>(s);
+    Tensor<cpu, 2> mask_ids = in_data[mask::kMaskIds].get<cpu, 2, real_t>(s);
+    float* crois = rois.dptr_;
+    float* cmask_boxes = mask_boxes.dptr_;
+    float* cgt_masks = gt_masks.dptr_;
+    float* cmask_ids = mask_ids.dptr_; 
 
-    // Getting the outputs
-    Tensor<cpu, 4> out_masks = out_data[mask::kMaskTargets].get<cpu, 4, real_t>(s);
-    
-    // The polygon format for each ground-truth object is as follows:
-    // [category, num_seg, len_seg1, len_seg2,....,len_segn, seg1_x1,seg1_y1,...,seg1_xm,seg1_ym,seg2_x1,seg2_y1,...]
+    Tensor<cpu, 4> mask_outs = out_data[mask::kMaskTargets].get<cpu, 4, real_t>(s);
+    float* cmask_outs = mask_outs.dptr_;
 
+    int mask_mem_size = param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes;
+    for(int i = 0; i < mask_mem_size; i++)
+      cmask_outs[i] = param_.ignore_label;
 
-    // Compute the bounding box around the polygons of each object (each object may have multiple polys)
-    // For each RoI find the mask bbox which have the highest overlap
-    // For each RoI project back the selected mask w.r.t. the RoI and projected in the requested out size
-    // Expand the binary masks to param_.num_classes channels
+    // Allocate memory for binary mask
+    float* binary_mask = new float[param_.mask_size*param_.mask_size];
+    for(int i = 0; i < param_.batch_size; i++){
+      for(int j = 0; j < param_.num_proposals; j++){
+        int offset = i * param_.num_proposals + j;
+        int mask_id = cmask_ids[offset];
+        int poly_offset = i * param_.max_num_gts * param_.max_polygon_len + mask_id * param_.max_polygon_len; 
+        // Convert the mask polygon to a binary mask
+        mask_utils::convertPoly2Mask(crois + offset * 5, cgt_masks + poly_offset, param_.mask_size, binary_mask);
+        // In our poly encoding the first element is the category
+        int category = (int) cgt_masks[poly_offset];
+        // Expand the binary mask to a class specific mask
+        int out_offset =  (i * param_.num_proposals + j) * 
+                          param_.mask_size * param_.mask_size * param_.num_classes;
+
+        mask_utils::expandBinaryMasks2ClassMasks(binary_mask, category, param_.mask_size, cmask_outs + out_offset);
+      }
+
+    }
+    delete [] binary_mask;
 
 
   }
@@ -133,20 +179,18 @@ class MaskRcnnTargetOp : public Operator{
                         const std::vector<TBlob> &aux_states) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_grad.size(), 5);
+    CHECK_EQ(in_grad.size(), 4);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 2> gscores = in_grad[mask::kRoIs].get<xpu, 2, real_t>(s);
-    Tensor<xpu, 2> gbbox = in_grad[mask::kImInfo].get<xpu, 2, real_t>(s);
-    Tensor<xpu, 2> ginfo = in_grad[mask::kGTMasks].get<xpu, 2, real_t>(s);
-    Tensor<xpu, 3> ggt_boxes = in_grad[mask::kGTBoxes].get<xpu, 3, real_t>(s);
-    Tensor<xpu, 2> gvalid_ranges = in_grad[mask::kValidRanges].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 2> grois = in_grad[mask::kRoIs].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 3> gmask_boxes = in_grad[mask::kMaskBoxes].get<xpu, 3, real_t>(s);
+    Tensor<xpu, 3> gmask_polys = in_grad[mask::kMaskPolys].get<xpu, 3, real_t>(s);
+    Tensor<xpu, 2> gmask_ids = in_grad[mask::kMaskIds].get<xpu, 2, real_t>(s);
 
-    Assign(gscores, req[mask::kRoIs], 0);
-    Assign(gbbox, req[mask::kImInfo], 0);
-    Assign(ginfo, req[mask::kGTMasks], 0);
-    Assign(ggt_boxes, req[mask::kGTBoxes], 0);
-    Assign(gvalid_ranges, req[mask::kValidRanges], 0);
+    Assign(grois, req[mask::kRoIs], 0);
+    Assign(gmask_boxes, req[mask::kMaskBoxes], 0);
+    Assign(gmask_polys, req[mask::kMaskPolys], 0);
+    Assign(gmask_ids, req[mask::kMaskIds], 0);
   }
 
  private:
@@ -167,10 +211,10 @@ DMLC_REGISTER_PARAMETER(MaskRcnnTargetParam);
 MXNET_REGISTER_OP_PROPERTY(MaskRcnnTarget, MaskRcnnTargetProp)
 .describe("Generates the target segmentaion mask for each RoI")
 .add_argument("rois", "NDArray-or-Symbol", "RoIs generated by RPN")
-.add_argument("im_info", "NDArray-or-Symbol", "Image size and scale.")
-.add_argument("gt_masks", "NDArray-or-Symbol", "Polygons representing the GT masks")
-.add_argument("gt_boxes", "NDArray-or-Symbol", "The ground-truth boxes")
-.add_argument("valid_ranges", "NDArray-or-Symbol", "Valid ranges for multi-scale training")
+.add_argument("mask_boxes", "NDArray-or-Symbol", "Mask Boxes.")
+.add_argument("mask_polys", "NDArray-or-Symbol", "Polygons representing the GT masks")
+.add_argument("mask_ids", "NDArray-or-Symbol", "Mask assignments.")
+
 .add_arguments(MaskRcnnTargetParam::__FIELDS__());
 
 }  // namespace op
