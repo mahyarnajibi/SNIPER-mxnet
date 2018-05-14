@@ -54,17 +54,19 @@ namespace mask_utils {
       h = std::max((float)1, h);
       int n_seg = poly[1];
 
-      int offset = 1 + n_seg;
+      int offset = 2 + n_seg;
       RLE* rles;
       rlesInit(&rles, n_seg);
       for(int i = 0; i < n_seg; i++){
-        int cur_len = poly[i+1];
+        int cur_len = poly[i+2];
         double* xys = new double[cur_len];
         for(int j = 0; j < cur_len; j++){
-          if(j % 2 == 0)
-            xys[j] = (poly[offset+j] - roi[1]) * mask_size / w;
-          else
-            xys[j] = (poly[offset+j] - roi[2]) * mask_size / h;
+        	if (j % 2 == 0)
+        		xys[j] = (poly[offset+j+1] - roi[2]) * mask_size / h;
+        	else
+        		xys[j] = (poly[offset+j-1] - roi[1]) * mask_size / w;
+
+
         }
         rleFrPoly(rles + i, xys, cur_len/2, mask_size, mask_size);
         delete [] xys;
@@ -127,8 +129,7 @@ class MaskRcnnTargetOp : public Operator{
     using namespace mshadow::expr;
     CHECK_EQ(in_data.size(), 4);
     CHECK_EQ(out_data.size(), 1);
-
-    usleep(20000000);
+    //usleep(20000000);
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<cpu, 2> rois = in_data[mask::kRoIs].get<cpu, 2, real_t>(s);
     Tensor<cpu, 3> mask_boxes = in_data[mask::kMaskBoxes].get<cpu, 3, real_t>(s);
@@ -138,36 +139,34 @@ class MaskRcnnTargetOp : public Operator{
     float* cmask_boxes = mask_boxes.dptr_;
     float* cgt_masks = gt_masks.dptr_;
     float* cmask_ids = mask_ids.dptr_; 
-
     Tensor<cpu, 4> mask_outs = out_data[mask::kMaskTargets].get<cpu, 4, real_t>(s);
     float* cmask_outs = mask_outs.dptr_;
-
     int mask_mem_size = param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes;
-    for(int i = 0; i < mask_mem_size; i++)
-      cmask_outs[i] = param_.ignore_label;
-
+    for(int i = 0; i < mask_mem_size; i++) {
+    	cmask_outs[i] = param_.ignore_label;
+    }
     // Allocate memory for binary mask
     float* binary_mask = new float[param_.mask_size*param_.mask_size];
-    for(int i = 0; i < param_.batch_size; i++){
-      for(int j = 0; j < param_.num_proposals; j++){
-        int offset = i * param_.num_proposals + j;
-        int mask_id = cmask_ids[offset];
-        int poly_offset = i * param_.max_num_gts * param_.max_polygon_len + mask_id * param_.max_polygon_len; 
+    for(int i = 0; i < param_.batch_size * param_.num_proposals; i++){
+        int mask_id = cmask_ids[i];
+        if (mask_id == -1) {
+          continue;
+        }
+        
+        int imid = crois[5*i];
+        int poly_offset = imid * param_.max_num_gts * param_.max_polygon_len + mask_id * param_.max_polygon_len; 
         // Convert the mask polygon to a binary mask
-        mask_utils::convertPoly2Mask(crois + offset * 5, cgt_masks + poly_offset, param_.mask_size, binary_mask);
+        mask_utils::convertPoly2Mask(crois + i * 5, cgt_masks + poly_offset, param_.mask_size, binary_mask);
         // In our poly encoding the first element is the category
         int category = (int) cgt_masks[poly_offset];
         // Expand the binary mask to a class specific mask
-        int out_offset =  (i * param_.num_proposals + j) * 
-                          param_.mask_size * param_.mask_size * param_.num_classes;
-
+        int out_offset =  i * param_.mask_size * param_.mask_size * param_.num_classes;
+        if(imid==0){
+          std::cout<<imid<<" "<<category<<" "<<poly_offset<<" "<<out_offset<<std::endl;
+        }
         mask_utils::expandBinaryMasks2ClassMasks(binary_mask, category, param_.mask_size, cmask_outs + out_offset);
-      }
-
     }
     delete [] binary_mask;
-
-
   }
 
   virtual void Backward(const OpContext &ctx,

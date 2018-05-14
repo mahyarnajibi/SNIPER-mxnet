@@ -63,13 +63,13 @@ struct MaskRcnnTargetParam : public dmlc::Parameter<MaskRcnnTargetParam> {
   int num_classes;
   int max_output_masks;
   DMLC_DECLARE_PARAMETER(MaskRcnnTargetParam) {
-    DMLC_DECLARE_FIELD(batch_size).set_default(16)
+    DMLC_DECLARE_FIELD(batch_size).set_default(10)
     .describe("batch size");
-    DMLC_DECLARE_FIELD(mask_size).set_default(14)
+    DMLC_DECLARE_FIELD(mask_size).set_default(28)
     .describe("Size of the generated mask for each ROI");
     DMLC_DECLARE_FIELD(ignore_label).set_default(-1)
     .describe("Ignore label in output mask");
-    DMLC_DECLARE_FIELD(num_proposals).set_default(300)
+    DMLC_DECLARE_FIELD(num_proposals).set_default(50)
     .describe("Number of proposals per image");
     DMLC_DECLARE_FIELD(max_polygon_len).set_default(500)
     .describe("Maximum possible length of a polygon");
@@ -77,9 +77,7 @@ struct MaskRcnnTargetParam : public dmlc::Parameter<MaskRcnnTargetParam> {
     .describe("Maximum possible number of gts per image");
     DMLC_DECLARE_FIELD(num_classes).set_default(80)
     .describe("Number of classes for mask generation");
-    DMLC_DECLARE_FIELD(max_output_masks).set_default(100)
-    .describe("Maximum number of positve masks which will be outputed");
-    DMLC_DECLARE_FIELD(workspace).set_default(128).set_range(0, 8192)
+    DMLC_DECLARE_FIELD(workspace).set_default(512).set_range(0, 8192)
       .describe("Maximum temperal workspace allowed for kTempResource");
 
   }
@@ -109,7 +107,7 @@ class MaskRcnnTargetProp : public OperatorProperty {
 
     out_shape->clear();
     // output
-    out_shape->push_back(Shape4(param_.batch_size * param_.max_output_masks, param_.num_classes, param_.mask_size, param_.mask_size));
+    out_shape->push_back(Shape4(param_.batch_size * param_.num_proposals, param_.num_classes, param_.mask_size, param_.mask_size));
     return true;
   }
 
