@@ -65,17 +65,19 @@ namespace mask_utils {
       h = std::max((float)1, h);
       int n_seg = poly[1];
 
-      int offset = 1 + n_seg;
+      int offset = 2 + n_seg;
       RLE* rles;
       rlesInit(&rles, n_seg);
       for(int i = 0; i < n_seg; i++){
-        int cur_len = poly[i+1];
+        int cur_len = poly[i+2];
         double* xys = new double[cur_len];
         for(int j = 0; j < cur_len; j++){
-          if(j % 2 == 0)
-            xys[j] = poly[offset+j+1]/4; //(poly[offset+j] - roi[1]) * mask_size / w;
+          if (j % 2 == 0)
+            xys[j] = (poly[offset+j+1] - roi[2]) * mask_size / h;
           else
-            xys[j] = poly[offset+j-1]/4;//(poly[offset+j] - roi[2]) * mask_size / h;
+            xys[j] = (poly[offset+j-1] - roi[1]) * mask_size / w;
+
+
         }
         rleFrPoly(rles + i, xys, cur_len/2, mask_size, mask_size);
         delete [] xys;
@@ -103,7 +105,8 @@ namespace mask_utils {
       delete [] byte_mask;
 
     }
-    inline void expandBinaryMasks2ClassMasks(const float* binary_mask, const int category, const int mask_size, float* class_masks)
+    inline void expandBinaryMasks2ClassMasks(const float* binary_mask, const int category, const int mask_size, \
+     float* class_masks, float* mask_weights)
     {
       /* !
      Given binary masks and the classes, copy each into the correct category channel
@@ -117,6 +120,7 @@ namespace mask_utils {
       int offset = category * mask_size * mask_size;
       for(int i = 0; i < mask_size * mask_size; i++){
         class_masks[offset + i] = (binary_mask[i] == 1) ? 1 : 0;
+        mask_weights[offset + i] = 1;
       }
     }
 
@@ -126,23 +130,23 @@ namespace mask_utils {
 template<typename xpu>
 class MaskRcnnTargetGPUOp : public Operator{
  public:
- 	float* cmask_outs;
+ 	float* cmask_outs, *cmask_weights;
   float* crois, *cmask_boxes, *cgt_masks, *cmask_ids;
 
   explicit MaskRcnnTargetGPUOp(MaskRcnnTargetParam param) {
     this->param_ = param;
     this->cmask_outs = new float[param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes];
+    this->cmask_weights = new float[param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes];
     this->crois = new float[param_.batch_size*param_.num_proposals*5];
-    this->cmask_boxes = new float[param_.batch_size*param_.max_num_gts*4];
     this->cgt_masks = new float[param_.batch_size*param_.max_num_gts*param_.max_polygon_len];
     this->cmask_ids = new float[param_.batch_size*param_.num_proposals];
   }
   ~MaskRcnnTargetGPUOp() {
     delete [] this->cmask_outs; 
     delete [] this->crois;
-    delete [] this->cmask_boxes;
     delete [] this->cgt_masks;
     delete [] this->cmask_ids;
+    delete [] this->cmask_weights;
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -150,8 +154,8 @@ class MaskRcnnTargetGPUOp : public Operator{
                        const std::vector<OpReqType> &req,
                        const std::vector<TBlob> &out_data,
                        const std::vector<TBlob> &aux_states) {
-  	CHECK_EQ(in_data.size(), 4);
-    CHECK_EQ(out_data.size(), 1);
+  	CHECK_EQ(in_data.size(), 3);
+    CHECK_EQ(out_data.size(), 2);
     using namespace mshadow;
     using namespace mshadow::expr;
     // The polygon format for each ground-truth object is as follows:
@@ -160,48 +164,54 @@ class MaskRcnnTargetGPUOp : public Operator{
     // Get input
     Stream<gpu> *s = ctx.get_stream<gpu>();
     Tensor<gpu, 2> rois = in_data[mask::kRoIs].get<gpu, 2, real_t>(s);
-    Tensor<gpu, 3> mask_boxes = in_data[mask::kMaskBoxes].get<gpu, 3, real_t>(s);
     Tensor<gpu, 3> gt_masks = in_data[mask::kMaskPolys].get<gpu, 3, real_t>(s);\
     Tensor<gpu, 2> mask_ids = in_data[mask::kMaskIds].get<gpu, 2, real_t>(s);
 
     // Copy to CPU
     cudaMemcpy(crois, rois.dptr_, param_.batch_size*param_.num_proposals*5*sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(cmask_boxes, mask_boxes.dptr_, param_.batch_size*param_.max_num_gts*4*sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(cgt_masks, gt_masks.dptr_, param_.batch_size*param_.max_num_gts*param_.max_polygon_len*sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(cmask_ids, mask_ids.dptr_, param_.batch_size*param_.num_proposals*sizeof(float), cudaMemcpyDeviceToHost);
 
     // Initialize the mask memory
     int mask_mem_size = param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes;
-    for(int i = 0; i < mask_mem_size; i++)
+    for(int i = 0; i < mask_mem_size; i++){
       cmask_outs[i] = param_.ignore_label;
+      cmask_weights[i] = 0;
+    }
 
     // Allocate memory for binary mask
     float* binary_mask = new float[param_.mask_size*param_.mask_size];
-    for(int i = 0; i < param_.batch_size; i++){
-      for(int j = 0; j < param_.num_proposals; j++){
-        int offset = i * param_.num_proposals + j;
-        int mask_id = cmask_ids[offset];
-        int poly_offset = i * param_.max_num_gts * param_.max_polygon_len + mask_id * param_.max_polygon_len; 
+    for(int i = 0; i < param_.batch_size * param_.num_proposals; i++){
+        int mask_id = cmask_ids[i];
+        if (mask_id == -1) {
+          continue;
+        }
+        
+        int imid = crois[5*i];
+        int poly_offset = imid * param_.max_num_gts * param_.max_polygon_len + mask_id * param_.max_polygon_len; 
         // Convert the mask polygon to a binary mask
-        mask_utils::convertPoly2Mask(crois + offset * 5, cgt_masks + poly_offset, param_.mask_size, binary_mask);
+        mask_utils::convertPoly2Mask(crois + i * 5, cgt_masks + poly_offset, param_.mask_size, binary_mask);
         // In our poly encoding the first element is the category
         int category = (int) cgt_masks[poly_offset];
         // Expand the binary mask to a class specific mask
-        int out_offset =  (i * param_.num_proposals + j) * 
-                          param_.mask_size * param_.mask_size * param_.num_classes;
+        int out_offset =  i * param_.mask_size * param_.mask_size * param_.num_classes;
 
-        mask_utils::expandBinaryMasks2ClassMasks(binary_mask, category, param_.mask_size, cmask_outs + out_offset);
-      }
-
+        mask_utils::expandBinaryMasks2ClassMasks(binary_mask, category, param_.mask_size, \
+          cmask_outs + out_offset, cmask_weights + out_offset);
     }
     delete [] binary_mask;
+  
 
     // Get output
 	  Stream<gpu> *so = ctx.get_stream<gpu>();    
     Tensor<gpu, 4> out_masks = out_data[mask::kMaskTargets].get<gpu, 4, real_t>(so);
+    Tensor<gpu, 4> mask_weights = out_data[mask::kMaskWeights].get<gpu, 4, real_t>(so);
 
     // Copy output to the GPU
     cudaMemcpy(out_masks.dptr_, cmask_outs, \
+      param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes*sizeof(float), \
+      cudaMemcpyHostToDevice);
+    cudaMemcpy(mask_weights.dptr_, cmask_weights, \
       param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes*sizeof(float), \
       cudaMemcpyHostToDevice);
   }
@@ -215,16 +225,14 @@ class MaskRcnnTargetGPUOp : public Operator{
                         const std::vector<TBlob> &aux_states) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_grad.size(), 4);
+    CHECK_EQ(in_grad.size(), 3);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<xpu, 2> grois = in_grad[mask::kRoIs].get<xpu, 2, real_t>(s);
-    Tensor<xpu, 3> gmask_boxes = in_grad[mask::kMaskBoxes].get<xpu, 3, real_t>(s);
     Tensor<xpu, 3> gmask_polys = in_grad[mask::kMaskPolys].get<xpu, 3, real_t>(s);
     Tensor<xpu, 2> gmask_ids = in_grad[mask::kMaskIds].get<xpu, 2, real_t>(s);
 
     Assign(grois, req[mask::kRoIs], 0);
-    Assign(gmask_boxes, req[mask::kMaskBoxes], 0);
     Assign(gmask_polys, req[mask::kMaskPolys], 0);
     Assign(gmask_ids, req[mask::kMaskIds], 0);
 

@@ -47,8 +47,8 @@ namespace mxnet {
 namespace op {
 
 namespace mask {
-enum MaskRcnnTargetOpInputs {kRoIs, kMaskBoxes, kMaskPolys, kMaskIds};
-enum MaskRcnnOpOutputs {kMaskTargets};
+enum MaskRcnnTargetOpInputs {kRoIs, kMaskPolys, kMaskIds};
+enum MaskRcnnOpOutputs {kMaskTargets, kMaskWeights};
 enum MaskRcnnTargetForwardResource {kTempSpace};
 }  // end of mask namespace
 
@@ -101,13 +101,14 @@ class MaskRcnnTargetProp : public OperatorProperty {
                   std::vector<TShape> *out_shape,
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
-    CHECK_EQ(in_shape->size(), 4) << "Input:[rois, mask_boxes, mask_polys, mask_ids]";
-    const TShape &dshape = in_shape->at(mask::kRoIs);
+    CHECK_EQ(in_shape->size(), 3) << "Input:[rois, mask_polys, mask_ids]";
+    const TShape &dshape = in_shape->at(mask::kMaskPolys);
     if (dshape.ndim() == 0) return false;
 
     out_shape->clear();
     // output
-    out_shape->push_back(Shape4(param_.batch_size * param_.num_proposals, param_.num_classes, param_.mask_size, param_.mask_size));
+    out_shape->push_back(Shape4(dshape[0] * param_.num_proposals, param_.num_classes, param_.mask_size, param_.mask_size));
+    out_shape->push_back(Shape4(dshape[0] * param_.num_proposals, param_.num_classes, param_.mask_size, param_.mask_size));
     return true;
   }
 
@@ -134,19 +135,19 @@ class MaskRcnnTargetProp : public OperatorProperty {
   }
 
   int NumVisibleOutputs() const override {
-    return 1;
+    return 2;
   }
 
   int NumOutputs() const override {
-    return 1;
+    return 2;
   }
 
   std::vector<std::string> ListArguments() const override {
-    return {"rois", "mask_boxes", "mask_polys", "mask_ids"};
+    return {"rois", "mask_polys", "mask_ids"};
   }
 
   std::vector<std::string> ListOutputs() const override {
-    return {"mask_targets"};
+    return {"mask_targets", "mask_weights"};
   }
 
   Operator* CreateOperator(Context ctx) const override;
