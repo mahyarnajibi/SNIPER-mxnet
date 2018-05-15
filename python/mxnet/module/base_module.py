@@ -689,7 +689,7 @@ class BaseModule(object):
                     end_of_batch = True
 
                 self.update_metric(eval_metric, data_batch.label)
-                if ct % vis_freq == 0 and vis:
+                if vis and ct % vis_freq == 0:
                     root_path = 'debug/visualization/'
                     date = time.localtime()
                     date = str(date.tm_mon) + '_' + str(date.tm_mday) + '_' \
