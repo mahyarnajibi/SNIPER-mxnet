@@ -590,7 +590,7 @@ class MultiProposalTargetMaskGPUOp : public Operator{
                         const std::vector<TBlob> &aux_states) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_grad.size(), 6);
+    CHECK_EQ(in_grad.size(), 5);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<xpu, 4> gscores = in_grad[proposal::kClsProb].get<xpu, 4, real_t>(s);

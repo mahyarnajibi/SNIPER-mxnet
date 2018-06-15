@@ -127,49 +127,8 @@ class MaskRcnnTargetOp : public Operator{
                        const std::vector<OpReqType> &req,
                        const std::vector<TBlob> &out_data,
                        const std::vector<TBlob> &aux_states) {
-    using namespace mshadow;
-    using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), 3);
-    CHECK_EQ(out_data.size(), 2);
-    //usleep(20000000);
-    Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<cpu, 2> rois = in_data[mask::kRoIs].get<cpu, 2, real_t>(s);
-    Tensor<cpu, 3> gt_masks = in_data[mask::kMaskPolys].get<cpu, 3, real_t>(s);
-    Tensor<cpu, 2> mask_ids = in_data[mask::kMaskIds].get<cpu, 2, real_t>(s);
-    float* crois = rois.dptr_;
-    float* cgt_masks = gt_masks.dptr_;
-    float* cmask_ids = mask_ids.dptr_; 
-    Tensor<cpu, 4> mask_outs = out_data[mask::kMaskTargets].get<cpu, 4, real_t>(s);
-    Tensor<cpu, 4> mask_weights = out_data[mask::kMaskWeights].get<cpu, 4, real_t>(s);
 
-    float* cmask_outs = mask_outs.dptr_;
-    float* cmask_weights = mask_weights.dptr_;
-    int mask_mem_size = param_.batch_size*param_.num_proposals*param_.mask_size*param_.mask_size*param_.num_classes;
-    for(int i = 0; i < mask_mem_size; i++) {
-    	cmask_outs[i] = param_.ignore_label;
-      cmask_weights[i] = 0;
-    }
-    // Allocate memory for binary mask
-    float* binary_mask = new float[param_.mask_size*param_.mask_size];
-    for(int i = 0; i < param_.batch_size * param_.num_proposals; i++){
-        int mask_id = cmask_ids[i];
-        if (mask_id == -1) {
-          continue;
-        }
-        
-        int imid = crois[5*i];
-        int poly_offset = imid * param_.max_num_gts * param_.max_polygon_len + mask_id * param_.max_polygon_len; 
-        // Convert the mask polygon to a binary mask
-        mask_utils::convertPoly2Mask(crois + i * 5, cgt_masks + poly_offset, param_.mask_size, binary_mask);
-        // In our poly encoding the first element is the category
-        int category = (int) cgt_masks[poly_offset];
-        // Expand the binary mask to a class specific mask
-        int out_offset =  i * param_.mask_size * param_.mask_size * param_.num_classes;
-        
-        mask_utils::expandBinaryMasks2ClassMasks(binary_mask, category, param_.mask_size, \
-         cmask_outs + out_offset, cmask_weights+out_offset);
-    }
-    delete [] binary_mask;
+    //Not implemented in CPU mode!
   }
 
   virtual void Backward(const OpContext &ctx,

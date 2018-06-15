@@ -48,7 +48,7 @@ namespace op {
 
 namespace mask {
 enum MaskRcnnTargetOpInputs {kRoIs, kMaskPolys, kMaskIds};
-enum MaskRcnnOpOutputs {kMaskTargets, kMaskWeights};
+enum MaskRcnnOpOutputs {kMaskTargets, kMaskCls};
 enum MaskRcnnTargetForwardResource {kTempSpace};
 }  // end of mask namespace
 
@@ -107,8 +107,8 @@ class MaskRcnnTargetProp : public OperatorProperty {
 
     out_shape->clear();
     // output
-    out_shape->push_back(Shape4(dshape[0] * param_.num_proposals, param_.num_classes, param_.mask_size, param_.mask_size));
-    out_shape->push_back(Shape4(dshape[0] * param_.num_proposals, param_.num_classes, param_.mask_size, param_.mask_size));
+    out_shape->push_back(Shape3(dshape[0] * param_.num_proposals, param_.mask_size, param_.mask_size));
+    out_shape->push_back(Shape3(dshape[0] * param_.num_proposals, param_.mask_size, param_.mask_size));
     return true;
   }
 
@@ -147,7 +147,7 @@ class MaskRcnnTargetProp : public OperatorProperty {
   }
 
   std::vector<std::string> ListOutputs() const override {
-    return {"mask_targets", "mask_weights"};
+    return {"mask_targets", "mask_cls"};
   }
 
   Operator* CreateOperator(Context ctx) const override;
