@@ -31,10 +31,7 @@ from ..model import BatchEndParam
 from ..initializer import Uniform
 from ..io import DataDesc
 from ..base import _as_list
-import numpy as np
-import pickle
-import os
-import mxnet as mx
+
 
 def _check_input_names(symbol, names, typename, throw):
     """Check that all input names are in symbol's arguments."""
@@ -402,11 +399,7 @@ class BaseModule(object):
             eval_batch_end_callback=None, initializer=Uniform(0.01),
             arg_params=None, aux_params=None, allow_missing=False,
             force_rebind=False, force_init=False, begin_epoch=0, num_epoch=None,
-            validation_metric=None, monitor=None, sparse_row_id_fn=None,
-            # Extra params added by Mahyar
-            # would be ignored if vis is false
-            vis=False, prefix=None, vis_freq=None, vis_path=None, bbox_stds=None,
-            class_names=None, pixel_means=None):
+            validation_metric=None, monitor=None, sparse_row_id_fn=None):
         """Trains the module parameters.
 
         Checkout `Module Tutorial <http://mxnet.io/tutorials/basic/module.html>`_ to see
@@ -485,169 +478,6 @@ class BaseModule(object):
         ...     arg_params=arg_params, aux_params=aux_params,
         ...     eval_metric='acc', num_epoch=10, begin_epoch=3)
         """
-
-        if vis:
-            if not prefix: prefix = 'debug'
-            if not vis_freq: vis_freq = 100
-            if not vis_path: vis_path = 'debug/visualization'
-            if bbox_stds is None: bbox_stds = np.array([103.06,115.90,123.15])
-            if pixel_means is None: pixel_means = np.array([103.939,116.779,123.68])
-
-        def nms(dets, thresh):
-            if dets.shape[0] == 0:
-                return []
-
-            x1 = dets[:, 0]
-            y1 = dets[:, 1]
-            x2 = dets[:, 2]
-            y2 = dets[:, 3]
-            scores = dets[:, 4]
-
-            areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-            order = scores.argsort()[::-1]
-
-            keep = []
-            while order.size > 0:
-                i = order[0]
-                keep.append(i)
-                xx1 = np.maximum(x1[i], x1[order[1:]])
-                yy1 = np.maximum(y1[i], y1[order[1:]])
-                xx2 = np.minimum(x2[i], x2[order[1:]])
-                yy2 = np.minimum(y2[i], y2[order[1:]])
-
-                w = np.maximum(0.0, xx2 - xx1 + 1)
-                h = np.maximum(0.0, yy2 - yy1 + 1)
-                inter = w * h
-                ovr = inter / (areas[i] + areas[order[1:]] - inter)
-
-                inds = np.where(ovr <= thresh)[0]
-                order = order[inds + 1]
-
-            return keep
-
-        def clip_boxes(boxes, im_shape):
-            boxes[:, 0::4] = np.maximum(np.minimum(boxes[:, 0::4], im_shape[1] - 1), 0)
-            boxes[:, 1::4] = np.maximum(np.minimum(boxes[:, 1::4], im_shape[0] - 1), 0)
-            boxes[:, 2::4] = np.maximum(np.minimum(boxes[:, 2::4], im_shape[1] - 1), 0)
-            boxes[:, 3::4] = np.maximum(np.minimum(boxes[:, 3::4], im_shape[0] - 1), 0)
-            return boxes
-
-        def bbox_pred(boxes, box_deltas):
-            if boxes.shape[0] == 0:
-                return np.zeros((0, box_deltas.shape[1]))
-
-            boxes = boxes.astype(np.float, copy=False)
-            widths = boxes[:, 2] - boxes[:, 0] + 1.0
-            heights = boxes[:, 3] - boxes[:, 1] + 1.0
-            ctr_x = boxes[:, 0] + 0.5 * (widths - 1.0)
-            ctr_y = boxes[:, 1] + 0.5 * (heights - 1.0)
-
-            dx = box_deltas[:, 0::4]
-            dy = box_deltas[:, 1::4]
-            dw = box_deltas[:, 2::4]
-            dh = box_deltas[:, 3::4]
-
-            pred_ctr_x = dx * widths[:, np.newaxis] + ctr_x[:, np.newaxis]
-            pred_ctr_y = dy * heights[:, np.newaxis] + ctr_y[:, np.newaxis]
-            pred_w = np.exp(dw) * widths[:, np.newaxis]
-            pred_h = np.exp(dh) * heights[:, np.newaxis]
-
-            pred_boxes = np.zeros(box_deltas.shape)
-            # x1
-            pred_boxes[:, 0::4] = pred_ctr_x - 0.5 * (pred_w - 1.0)
-            # y1
-            pred_boxes[:, 1::4] = pred_ctr_y - 0.5 * (pred_h - 1.0)
-            # x2
-            pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * (pred_w - 1.0)
-            # y2
-            pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * (pred_h - 1.0)
-
-            return pred_boxes
-
-        def dump_batch(data_batch,root_path):
-            im  = data_batch.data[0][0].asnumpy().astype(np.float16)[np.newaxis,:,:,:]
-            path = os.path.join(root_path, 'batch_dumped_{}.pkl'.format(prefix))
-            with open(path,'wb') as f:
-                pickle.dump(im, f, pickle.HIGHEST_PROTOCOL)
-
-        def visualize_predictions(count,root_path,prefix=None, orig_prefix=None):
-            def transform_inverse(im_tensor, pixel_means):
-                im_tensor = im_tensor.copy()
-                # put channel back
-                channel_swap = (0, 2, 3, 1)
-                im_tensor = im_tensor.transpose(channel_swap)
-                im = im_tensor[0]
-                assert im.shape[2] == 3
-                im += pixel_means[[2, 1, 0]]
-                im = im.astype(np.uint8)
-                return im
-
-            def vis_all_detection(im_array, detections, num_classes, threshold=0.5,path=None):
-                import matplotlib as mpl
-                mpl.use('Agg')
-                import matplotlib.pyplot as plt
-                import random
-                #class_names = ['__background__', 'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush']
-  
-                im = transform_inverse(im_array,pixel_means)
-                plt.imshow(im)
-                
-                for j in range(1, num_classes):
-                    name = 'obj' if not class_names else class_names[j]
-                    color = (random.random(), random.random(), random.random())  # generate a random color
-                    dets = detections[j]
-                    
-                    for det in dets[0]:
-                        if det.shape[0]==0:
-                            continue
-                        bbox = det[:4]
-                        score = det[-1]
-                        if score < threshold:
-                            continue
-                        rect = plt.Rectangle((bbox[0], bbox[1]),
-                                             bbox[2] - bbox[0],
-                                             bbox[3] - bbox[1], fill=False,
-                                             edgecolor=color, linewidth=3.5)
-                        plt.gca().add_patch(rect)
-                        plt.gca().text(bbox[0], bbox[1] - 2, '{:s} {:.3f}'.format(name, score), bbox=dict(facecolor=color, alpha=0.5), fontsize=12, color='white')
-                plt.savefig(path)
-                plt.cla()
-                plt.clf()
-                plt.close()
-
-
-            thresh = 0.5
-            #print('starting vis')
-            im_rois_path = os.path.join(root_path,'batch_dumped_{}.pkl'.format(orig_prefix))
-            with open(im_rois_path,'rb') as f:
-                im_tensor = pickle.load(f)
-            pred_path = os.path.join(root_path,'dump_preds_{}.pkl'.format(orig_prefix))
-            with open(pred_path,'rb') as f:
-                (cls_prob, bbox_preds, rois, labels) = pickle.load(f)
-
-            im_shape1 = [im_tensor.shape[2],im_tensor.shape[3]]
-
-
-            
-            num_classes = cls_prob.shape[1]
-            pred_boxes1 = bbox_pred(rois[:, 1:], bbox_preds * bbox_stds)
-            pred_boxes1 = clip_boxes(pred_boxes1, im_shape1)
-            
-            all_boxes = [[[] for _ in range(1)]
-                          for _ in range(num_classes)]
-
-            for j in range(1, num_classes):
-                indexes = np.where(cls_prob[:, j] > thresh)[0]
-                cls_scores = cls_prob[indexes, j, np.newaxis]
-                cls_boxes = pred_boxes1[indexes,:]
-                cls_dets = np.hstack((cls_boxes, cls_scores))
-                keep = nms(cls_dets, 0.45)
-                all_boxes[j][0] = cls_dets[keep, :]
-
-            vis_all_detection(im_tensor,all_boxes, num_classes, path=os.path.join(root_path,'{}_{}_main.png'.format(prefix,count)))
-            all_boxes = [[[] for _ in range(1)]
-                          for _ in range(num_classes)]
-
         assert num_epoch is not None, 'please specify number of epochs'
 
         self.bind(data_shapes=train_data.provide_data, label_shapes=train_data.provide_label,
@@ -674,7 +504,6 @@ class BaseModule(object):
             data_iter = iter(train_data)
             end_of_batch = False
             next_data_batch = next(data_iter)
-            ct = 0
             while not end_of_batch:
                 data_batch = next_data_batch
                 if monitor is not None:
@@ -689,15 +518,7 @@ class BaseModule(object):
                     end_of_batch = True
 
                 self.update_metric(eval_metric, data_batch.label)
-                if vis and ct % vis_freq == 0:
-                    root_path = 'debug/visualization/'
-                    date = time.localtime()
-                    date = str(date.tm_mon) + '_' + str(date.tm_mday) + '_' \
-                        + str(date.tm_hour) + '_' + str(date.tm_min)
-                    net_name = prefix + '_epoch_{}'.format(epoch)+'_'+date
-                    dump_batch(data_batch,root_path)
-                    visualize_predictions(ct, root_path, prefix=net_name, orig_prefix=prefix)
-                ct = ct + 1
+
                 if monitor is not None:
                     monitor.toc_print()
 
