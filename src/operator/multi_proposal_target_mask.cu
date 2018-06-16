@@ -297,6 +297,7 @@ class MultiProposalTargetMaskGPUOp : public Operator{
   float *gt_boxes;
   float *out_pos_boxes;
   float *out_pos_ids;
+  float *out_pos_labels;
 
   explicit MultiProposalTargetMaskGPUOp(MultiProposalTargetMaskParam param) {
     this->param_ = param;
@@ -309,6 +310,7 @@ class MultiProposalTargetMaskGPUOp : public Operator{
 
     this->out_pos_boxes = new float[param.max_masks*param.batch_size*5];
     this->out_pos_ids = new float[param.max_masks*param.batch_size];
+    this->out_pos_labels = new float[param.max_masks*param.batch_size];
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -317,7 +319,7 @@ class MultiProposalTargetMaskGPUOp : public Operator{
                        const std::vector<TBlob> &out_data,
                        const std::vector<TBlob> &aux_states) {
     CHECK_EQ(in_data.size(), 5);
-    CHECK_EQ(out_data.size(), 6);
+    CHECK_EQ(out_data.size(), 7);
     
     using namespace mshadow;
     using namespace mshadow::expr;
@@ -424,7 +426,7 @@ class MultiProposalTargetMaskGPUOp : public Operator{
     for (int i = 0; i < num_images; i++) {
       for (int j = 0; j < rpn_post_nms_top_n; j++) {
         int basepos = rpn_post_nms_top_n*i + j;
-        labels[basepos] = 0;
+        labels[basepos] = 0.0;
         bbox_targets[4*basepos] = 1.0;
         bbox_targets[4*basepos + 1] = 1.0;
         bbox_targets[4*basepos + 2] = 1.0;
@@ -438,8 +440,11 @@ class MultiProposalTargetMaskGPUOp : public Operator{
     }
 
     float *maxids = new float[num_images*rpn_post_nms_top_n];
+    float *maxlabels = new float[num_images*rpn_post_nms_top_n];
+
     for (int i = 0; i < num_images*rpn_post_nms_top_n; i++) {
       maxids[i] = -1;
+      maxlabels[i] = -1;
     }
 
     #pragma omp parallel for num_threads(8)
@@ -461,7 +466,7 @@ class MultiProposalTargetMaskGPUOp : public Operator{
         }
 
         for (int i = props_this_batch; i < rpn_post_nms_top_n; i++) {
-          labels[imid*rpn_post_nms_top_n + i] = -1;
+          labels[imid*rpn_post_nms_top_n + i] = -1.0;
         }
         //get overlaps, maximum overlaps and gt labels
         for (int i = 0; i < numgts_per_image[imid]; i++) {
@@ -489,7 +494,11 @@ class MultiProposalTargetMaskGPUOp : public Operator{
               max_overlaps[j] = overlaps[i*num_gts_this_image + j];
               max_overlap_ids[j] = i;
               //set labels for positive proposals
-              labels[imid*rpn_post_nms_top_n + j] = gt_boxes[imid*5*max_gts + i*5 + 4];
+	      if (param_.rfcn_3k == false) {
+	      	 labels[imid*rpn_post_nms_top_n + j] = gt_boxes[imid*5*max_gts + i*5 + 4];
+	      } else {
+		 labels[imid*rpn_post_nms_top_n + j] = 1.0;
+	      }
               positive_label_ids.insert(j);
               tpct = tpct + 1;
             }
@@ -511,6 +520,7 @@ class MultiProposalTargetMaskGPUOp : public Operator{
           gtid = max_overlap_ids[pid];
 
           maxids[baseid] = gtid;
+	  maxlabels[baseid] = gt_boxes[imid*5*max_gts + gtid*5 + 4] - 1;
 
           gx1 = gt_boxes[imid*5*max_gts + gtid*5];
           gy1 = gt_boxes[imid*5*max_gts + gtid*5 + 1];
@@ -552,20 +562,25 @@ class MultiProposalTargetMaskGPUOp : public Operator{
         out_pos_boxes[5*mask_ct+3] = crois[5*i+3];
         out_pos_boxes[5*mask_ct+4] = crois[5*i+4];
         out_pos_ids[mask_ct] = maxids[i];
+	out_pos_labels[mask_ct] = maxlabels[i];
         mask_ct++;
       } 
     }
 
     for (int i = mask_ct; i < num_images*param_.max_masks; i++) {
-      out_pos_boxes[5*i] = i % num_images;
-      out_pos_boxes[5*i+1] = i % 200;
-      out_pos_boxes[5*i+2] = i % 200;
-      out_pos_boxes[5*i+3] = i % 200 + 100;
-      out_pos_boxes[5*i+4] = i % 200 + 100;
       out_pos_ids[i] = -1;
+      out_pos_labels[i] = -1;
     }
+
+    /*
+    for (int i = 0; i < num_images*300; i++) {
+    	if (labels[i] < -1 || labels[i] > 1) {
+	    std::cout << labels[i] << "\n";
+	}
+    }*/
     
     delete [] maxids;
+    delete [] maxlabels;
 
     Stream<gpu> *so = ctx.get_stream<gpu>();    
     Tensor<gpu, 2> olabels = out_data[proposal::kLabels].get<gpu, 2, real_t>(so);
@@ -573,9 +588,11 @@ class MultiProposalTargetMaskGPUOp : public Operator{
     Tensor<gpu, 2> obbox_weights = out_data[proposal::kBboxWeight].get<gpu, 2, real_t>(so);
     Tensor<gpu, 2> omaskrois = out_data[proposal::kMaskRoIs].get<gpu, 2, real_t>(s);
     Tensor<gpu, 2> omaskids = out_data[proposal::kMaskIds].get<gpu, 2, real_t>(s);
+    Tensor<gpu, 2> omasklabels = out_data[proposal::kMaskLabels].get<gpu, 2, real_t>(s);
 
     cudaMemcpy(omaskrois.dptr_, out_pos_boxes, sizeof(float) * num_images * param_.max_masks * 5, cudaMemcpyHostToDevice);
     cudaMemcpy(omaskids.dptr_, out_pos_ids, sizeof(float) * num_images * param_.max_masks, cudaMemcpyHostToDevice);
+    cudaMemcpy(omasklabels.dptr_, out_pos_labels, sizeof(float) * num_images * param_.max_masks, cudaMemcpyHostToDevice);
     cudaMemcpy(olabels.dptr_, labels, sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
     cudaMemcpy(obbox_targets.dptr_, bbox_targets, 4*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);
     cudaMemcpy(obbox_weights.dptr_, bbox_weights, 4*sizeof(float) * num_images*300, cudaMemcpyHostToDevice);    

@@ -48,7 +48,7 @@ namespace op {
 
 namespace proposal {
 enum MultiProposalTargetMaskOpInputs {kClsProb, kBBoxPred, kImInfo, kGTBoxes, kValidRanges};
-enum MultiProposalTargetMaskOpOutputs {kRoIs, kLabels, kBboxTarget, kBboxWeight, kMaskRoIs, kMaskIds};
+enum MultiProposalTargetMaskOpOutputs {kRoIs, kLabels, kBboxTarget, kBboxWeight, kMaskRoIs, kMaskIds, kMaskLabels};
 enum MultiProposalTargetMaskForwardResource {kTempSpace};
 }  // proposal
 
@@ -66,6 +66,7 @@ struct MultiProposalTargetMaskParam : public dmlc::Parameter<MultiProposalTarget
   int max_masks;
   int max_gts;
   int max_crowd;
+  bool rfcn_3k;
   
   DMLC_DECLARE_PARAMETER(MultiProposalTargetMaskParam) {
     float tmp[] = {0, 0, 0, 0, 0, 0, 0};
@@ -76,6 +77,8 @@ struct MultiProposalTargetMaskParam : public dmlc::Parameter<MultiProposalTarget
               "suppresion(suppress boxes with IoU >= this threshold");
     DMLC_DECLARE_FIELD(threshold).set_default(0.7)
     .describe("NMS value, below which to suppress.");
+    DMLC_DECLARE_FIELD(rfcn_3k).set_default(false)
+    .describe("weather 3k is enabled or not");
     DMLC_DECLARE_FIELD(batch_size).set_default(16)
     .describe("batch size");
     DMLC_DECLARE_FIELD(max_masks).set_default(50)
@@ -133,10 +136,15 @@ class MultiProposalTargetMaskProp : public OperatorProperty {
     out_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 4));
     // bbox_weight
     out_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 4));
+
     // mask_rois
     out_shape->push_back(Shape2(dshape[0] * param_.max_masks, 5));
     // mask_ids
     out_shape->push_back(Shape2(dshape[0] * param_.max_masks, 1));
+
+    //mask_labels
+    out_shape->push_back(Shape2(dshape[0] * param_.max_masks, 1));
+
     return true;
   }
 
@@ -163,11 +171,11 @@ class MultiProposalTargetMaskProp : public OperatorProperty {
   }
 
   int NumVisibleOutputs() const override {
-    return 6;
+    return 7;
   }
 
   int NumOutputs() const override {
-    return 6;
+    return 7;
   }
 
   std::vector<std::string> ListArguments() const override {
@@ -175,7 +183,7 @@ class MultiProposalTargetMaskProp : public OperatorProperty {
   }
 
   std::vector<std::string> ListOutputs() const override {
-    return {"rois", "label", "bbox_target", "bbox_weight", "mask_rois", "mask_ids"};
+    return {"rois", "label", "bbox_target", "bbox_weight", "mask_rois", "mask_ids", "mask_labels"};
   }
 
 
