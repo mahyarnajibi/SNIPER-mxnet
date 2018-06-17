@@ -358,10 +358,12 @@ ifeq ($(USE_CUDA), 1)
 	# Make sure to add stubs as fallback in order to be able to build
 	# without full CUDA install (especially if run without nvidia-docker)
 	LDFLAGS += -L/usr/local/cuda/lib64/stubs
-	LDFLAGS += -L/usr/local/cuda/lib64/
-	LDFLAGS += -L/lib/nccl/cuda-9
 	SCALA_PKG_PROFILE := $(SCALA_PKG_PROFILE)-gpu
 	ifeq ($(USE_NCCL), 1)
+		ifneq ($(USE_NCCL_PATH), NONE)
+			CFLAGS += -I$(USE_NCCL_PATH)/include
+			LDFLAGS += -L$(USE_NCCL_PATH)/lib
+		endif
 		LDFLAGS += -lnccl
 		CFLAGS += -DMXNET_USE_NCCL=1
 	else
