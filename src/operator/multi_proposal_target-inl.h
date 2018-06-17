@@ -47,8 +47,8 @@ namespace mxnet {
 namespace op {
 
 namespace proposal {
-enum MultiProposalTargetOpInputs {kClsProb, kBBoxPred, kImInfo, kGTBoxes, kValidRanges};
-enum MultiProposalTargetOpOutputs {kRoIs, kLabels, kBboxTarget, kBboxWeight};
+enum MultiProposalTargetOpInputs {kClsProb, kBBoxPred, kImInfo, kGTBoxes, kValidRanges, kCrowdBoxes};
+enum MultiProposalTargetOpOutputs {kRoIs, kLabels, kBboxTarget, kBboxWeight, kLabelWeight};
 enum MultiProposalTargetForwardResource {kTempSpace};
 }  // proposal
 
@@ -110,14 +110,9 @@ class MultiProposalTargetProp : public OperatorProperty {
                   std::vector<TShape> *out_shape,
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
-    CHECK_EQ(in_shape->size(), 5) << "Input:[cls_prob, bbox_pred, im_info, gt_boxes]";
+    CHECK_EQ(in_shape->size(), 6) << "Input:[cls_prob, bbox_pred, im_info, gt_boxes]";
     const TShape &dshape = in_shape->at(proposal::kClsProb);
     if (dshape.ndim() == 0) return false;
-
-    aux_shape->clear();
-    aux_shape->push_back(Shape2(dshape[0] * 21*32*32, 6));
-    aux_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 5));    
-    aux_shape->push_back(Shape2(21, 4));
 
     out_shape->clear();
     // output
@@ -128,6 +123,8 @@ class MultiProposalTargetProp : public OperatorProperty {
     out_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 4));
     // bbox_weight
     out_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 4));
+    //label_weight
+    out_shape->push_back(Shape2(dshape[0] * param_.rpn_post_nms_top_n, 1));
     return true;
   }
 
@@ -154,19 +151,19 @@ class MultiProposalTargetProp : public OperatorProperty {
   }
 
   int NumVisibleOutputs() const override {
-    return 4;
+    return 5;
   }
 
   int NumOutputs() const override {
-    return 4;
+    return 5;
   }
 
   std::vector<std::string> ListArguments() const override {
-    return {"cls_prob", "bbox_pred", "im_info", "gt_boxes", "valid_ranges"};
+    return {"cls_prob", "bbox_pred", "im_info", "gt_boxes", "valid_ranges", "crowd_boxes"};
   }
 
   std::vector<std::string> ListOutputs() const override {
-    return {"rois", "label", "bbox_target", "bbox_weight"};
+    return {"rois", "label", "bbox_target", "bbox_weight", "label_weight"};
   }
 
 
@@ -181,4 +178,3 @@ class MultiProposalTargetProp : public OperatorProperty {
 }  // namespace mxnet
 
 #endif  //  MXNET_OPERATOR_MULTI_PROPOSAL_INL_H_
-
