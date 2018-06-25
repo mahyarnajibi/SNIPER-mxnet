@@ -51,10 +51,10 @@ DEBUG = 0
 USE_SIGNAL_HANDLER =
 
 # the additional link flags you want to add
-ADD_LDFLAGS = -L/usr/local/cuda/lib64/stubs/
+ADD_LDFLAGS =
 
 # the additional compile flags you want to add
-ADD_CFLAGS = -I/usr/local/cuda/include
+ADD_CFLAGS =
 
 #---------------------------------------------
 # matrix computation libraries for CPU/GPU
@@ -75,9 +75,9 @@ ENABLE_CUDA_RTC = 1
 USE_CUDNN = 1
 
 #whether to use NCCL library
-USE_NCCL = 1
+USE_NCCL = 0
 #add the path to NCCL library
-USE_NCCL_PATH = -L/lib/nccl/cuda-9
+USE_NCCL_PATH =
 
 # whether use opencv during compilation
 # you can disable it, however, you will not able to use
