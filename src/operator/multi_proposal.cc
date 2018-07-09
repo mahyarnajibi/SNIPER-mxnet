@@ -174,6 +174,7 @@ inline void NonMaximumSuppression(float* dets,
   }
 
   int max_nms = std::min(12000, chip_anchors);
+
   #pragma omp parallel for num_threads(8)
   for (int i = 0; i < num_images; i++) {
     std::vector <float> sortids(chip_anchors);
