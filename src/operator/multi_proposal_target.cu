@@ -272,9 +272,11 @@ __global__ void NonMaximumSuppressionAndTargetAssignment(float* idets,
       a2 = (gt_boxes[5*(100*i + j) + 3] - gt_boxes[5*(100*i + j) + 1]) * (gt_boxes[5*(100*i + j) + 2] - gt_boxes[5*(100*i + j)]);
       inter = w * h;
       ovr = inter / (a1 + a2 - inter);
-      if (ovr > 0.5 && ovr > maxovr) {
-        maxovr = ovr;
-        maxid = j;
+      if (ovr > maxovr) {
+	maxovr = ovr;
+	if (ovr > 0.5){
+            maxid = j;
+	}
       }
       j = j + 1;
     }
