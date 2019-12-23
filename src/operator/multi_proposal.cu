@@ -162,11 +162,15 @@ inline void NonMaximumSuppression(float* dets,
                                   int num_anchors,
                                   int width,
                                   int height,
-                                  std::vector< std::vector<int> > & final_keep_images) {
-  
+                                  std::vector< std::vector<int> > & final_keep_images,
+                                  std::vector< std::vector<int> > & suppression_list,
+                                  std::vector<float> anchors,
+                                  float feature_stride,
+                                  float thresh) {
+
   int total_anchors = num_images*num_anchors*width*height;
   int chip_anchors = num_anchors*width*height;
-  
+
   float *area = new float[total_anchors];
 
   #pragma omp parallel for num_threads(8)
@@ -174,7 +178,8 @@ inline void NonMaximumSuppression(float* dets,
     area[i] = (dets[5*i + 2] - dets[5*i + 0] + 1) * (dets[5*i + 3] - dets[5*i + 1] + 1);
   }
 
-  int max_nms = min(12000, chip_anchors);
+  int max_nms = std::min(12000, chip_anchors);
+
   #pragma omp parallel for num_threads(8)
   for (int i = 0; i < num_images; i++) {
     std::vector <float> sortids(chip_anchors);
@@ -182,10 +187,12 @@ inline void NonMaximumSuppression(float* dets,
       sortids[j] = j;
     }
     int chip_index = i*chip_anchors;
-    std::sort(sortids.begin(), sortids.end(), 
+
+    std::sort(sortids.begin(), sortids.end(),
         [&dets,chip_index](int i1, int i2) {
           return dets[5*(chip_index + i1) + 4] > dets[5*(chip_index + i2) + 4];
         });
+
     float *dbuf = new float[6*max_nms];
 
     //reorder for spatial locality in CPU, yo!
@@ -200,7 +207,9 @@ inline void NonMaximumSuppression(float* dets,
     }
 
     int vct = 0;
-    for (int j = 0; j < max_nms && vct < post_nms_top_n; j++) {
+
+    int j = 0;
+    for (; j < max_nms && vct < post_nms_top_n; j++) {
       int index = i*chip_anchors + sortids[j];
       float ix1 = dbuf[6*j];
       float iy1 = dbuf[6*j+1];
@@ -217,7 +226,7 @@ inline void NonMaximumSuppression(float* dets,
       for (int pind = j + 1; pind < max_nms; pind++) {
         if (dbuf[6*pind + 4] == -1) {
           continue;
-        } 
+        }
         float xx1 = std::max(ix1, dbuf[6*pind]);
         float yy1 = std::max(iy1, dbuf[6*pind + 1]);
         float xx2 = std::min(ix2, dbuf[6*pind + 2]);
@@ -236,6 +245,154 @@ inline void NonMaximumSuppression(float* dets,
   delete [] area;
 }
 
+// For each index, check if its in the top max_nms, if it is calculate the iou, and set score to -1, if iou > 0.7.
+  inline void compute_iou(int ind, float* dets, float* area, int max_nms, float ix1, float iy1, float ix2, float iy2, float iarea){
+        if( dets[ind*5 + 4] != -1){
+            float xx1 = std::max(ix1, dets[5*ind]);
+            float yy1 = std::max(iy1, dets[5*ind + 1]);
+            float xx2 = std::min(ix2, dets[5*ind + 2]);
+            float yy2 = std::min(iy2, dets[5*ind + 3]);
+            float w = std::max(0.0f, xx2 - xx1 + 1.0f);
+            float h = std::max(0.0f, yy2 - yy1 + 1.0f);
+            float inter = w * h;
+            float ovr = inter / (iarea + area[ind] - inter);
+            if (ovr > 0.7) {
+              dets[5*ind + 4] = -1;
+            }
+          }
+
+  }
+
+
+inline void FastNonMaxSuppression(float* dets,
+                                  std::vector<std::vector<int>> & anchor_iou_map,
+                                  int post_nms_top_n,
+                                  int num_images,
+                                  int num_anchors,
+                                  int width,
+                                  int height,
+                                  std::vector<std::vector<int>> & final_keep_images,
+                                  std::vector<std::vector<int>> & suppression_list){
+
+  int total_anchors = num_images*num_anchors*width*height;
+  int chip_anchors = num_anchors*width*height;
+
+  float* area = new float[total_anchors];
+
+  // Pre compute area.
+  #pragma omp parallel for num_threads(8)
+  for (int i = 0; i < total_anchors; ++i) {
+    area[i] = (dets[5*i + 2] - dets[5*i + 0] + 1) * (dets[5*i + 3] - dets[5*i + 1] + 1);
+  }
+
+  int max_nms = std::min(12000, chip_anchors);
+
+  #pragma omp parallel for num_threads(8)
+  for (int i = 0; i < num_images; i++) {
+    std::vector <float> sortids(chip_anchors);
+    for (int j = 0; j < chip_anchors; j++) {
+      sortids[j] = j;
+    }
+    int chip_index = i*chip_anchors;
+    auto start_sort = std::chrono::high_resolution_clock::now();
+    std::nth_element(sortids.begin(), sortids.begin()+max_nms, sortids.end(),
+        [&dets,chip_index](int i1, int i2) {
+          return dets[5*(chip_index + i1) + 4] > dets[5*(chip_index + i2) + 4];
+        });
+    std::sort(sortids.begin(), sortids.begin()+max_nms,
+        [&dets,chip_index](int i1, int i2) {
+          return dets[5*(chip_index + i1) + 4] > dets[5*(chip_index + i2) + 4];
+        });
+ 
+
+    auto stop_sort = std::chrono::high_resolution_clock::now();
+    auto duration_sort = std::chrono::duration_cast<std::chrono::microseconds>(stop_sort - start_sort);
+
+    float *dbuf = new float[6*max_nms];
+
+    //reorder for spatial locality in CPU, yo!
+    // reorder indexes, for top max_nms scoring, proposals.
+    for (int j = 0; j < max_nms; j++) {
+      int index = i*chip_anchors + sortids[j];
+      dbuf[6*j] = dets[5*index];
+      dbuf[6*j+1] = dets[5*index+1];
+      dbuf[6*j+2] = dets[5*index+2];
+      dbuf[6*j+3] = dets[5*index+3];
+      dbuf[6*j+4] = dets[5*index+4];
+      dbuf[6*j+5] = area[index];
+    }
+
+    int vct = 0;
+    int im_area = width * height;
+    int idx_1;
+    int w_1, h_1, c_1, w_2, h_2, c_2;
+    int rel_w, rel_h;
+//    int iarea, pind;
+    std::vector<int> compute_idx;
+    int chip_range = i*chip_anchors;
+    // retrieve a proposal from the top ranked scoring proposals.
+    int j = 0;
+    auto start_loop = std::chrono::high_resolution_clock::now();
+    for (; j < max_nms && vct < post_nms_top_n; j++) {
+      int index = chip_range + sortids[j];
+      float ix1 = dbuf[6*j];
+      float iy1 = dbuf[6*j+1];
+      float ix2 = dbuf[6*j+2];
+      float iy2 = dbuf[6*j+3];
+      float iarea = dbuf[6*j+5];
+
+      idx_1 = sortids[j];
+      int mat = idx_1 % (im_area);
+      w_1 = mat % width;
+      h_1 = mat / width;
+      c_1 = idx_1 / im_area;
+
+      if (dbuf[6*j+4] == -1 || dets[5*index + 4] == -1) {
+        continue;
+      }
+
+      idx_1 = sortids[j];
+
+      final_keep_images[i].push_back(index);
+      vct = vct + 1;
+
+      // retrieve the precomputed anchor overlap vector for the given proposal
+      // each entry in the anchor_iou_map consists of a tuple containing relative width, relative height
+      // and channel of the anchor, with which the overlap of current proposal's anchor was higher than certain
+      // threshold.
+
+      compute_idx = anchor_iou_map[c_1];
+      int pind;
+      for(int i = 0; i < compute_idx.size()/3; i++){
+      // retrieve each entry of relative width, height and anchor channel.
+        rel_w = compute_idx[i*3+0];
+        rel_h = compute_idx[i*3+1];
+        c_2   = compute_idx[i*3+2];
+        w_2   = w_1 + rel_w;
+        h_2   = h_1 + rel_h;
+        pind  = chip_range + c_2*(height*width) + h_2 * width + w_2;
+
+        if(w_2 < width && w_2 >=0 && h_2 < height && h_2 >=0){
+            compute_iou(pind, dets, area, max_nms, ix1, iy1, ix2, iy2, iarea);
+        }
+
+      }
+    }
+
+    auto stop_loop = std::chrono::high_resolution_clock::now();
+    auto duration_loop = std::chrono::duration_cast<std::chrono::microseconds>(stop_loop - start_loop);
+    delete [] dbuf;
+  }
+  delete [] area;
+  }
+
+  inline void insert_anchor_iou(std::vector<std::vector<int>> &anchor_iou_dp, int anchor_type_1, int anchor_type_2, int dx, int dy){
+    // anchor 1 intersection with anchor 2
+    anchor_iou_dp[anchor_type_1].push_back(dx);
+    anchor_iou_dp[anchor_type_1].push_back(dy);
+    anchor_iou_dp[anchor_type_1].push_back(anchor_type_2);
+  }
+
 }  // namespace utils
 
 
@@ -248,6 +405,10 @@ class MultiProposalGPUOp : public Operator{
  	float *im_info;
  	float *rois;
   float *out_scores;
+     float* anchor_area;
+      std::vector<std::vector<int>> anchor_iou_dp;
+    bool is_anchor_overlap_precomputed;
+
 
 
   explicit MultiProposalGPUOp(MultiProposalParam param) {
@@ -259,6 +420,9 @@ class MultiProposalGPUOp : public Operator{
     this->im_info = new float[batch_size*3];
     this->rois = new float[param.rpn_post_nms_top_n * batch_size * 5];
     this->out_scores = new float[param.rpn_post_nms_top_n*batch_size];
+    this->anchor_area = new float[21];
+    this->is_anchor_overlap_precomputed = false;
+
   }
 
   ~MultiProposalGPUOp() {
@@ -275,6 +439,8 @@ class MultiProposalGPUOp : public Operator{
                        const std::vector<OpReqType> &req,
                        const std::vector<TBlob> &out_data,
                        const std::vector<TBlob> &aux_states) {
+    bool useFastNMS = true;
+    
     CHECK_EQ(in_data.size(), 3);
     CHECK_EQ(out_data.size(), 2);
     
@@ -312,6 +478,17 @@ class MultiProposalGPUOp : public Operator{
                            param_.scales,
                            &anchors);
 
+    float a1_x1, a1_x2, a1_y1, a1_y2, a2_x1, a2_x2, a2_y1, a2_y2, a1_area, a2_area;
+//    #pragma omp parallel for num_threads(8)
+    for(int i = 0; i < num_anchors; i++){
+        a1_x1 = anchors[4*i + 0];
+        a1_y1 = anchors[4*i + 1];
+        a1_x2 = anchors[4*i + 2];
+        a1_y2 = anchors[4*i + 3];
+        a1_area = (a1_x2 - a1_x1 + 1)*(a1_y2 - a1_y1 + 1);
+        anchor_area[i] = a1_area;
+    }
+
     //std::cout << "quack 3" << std::endl;
     #pragma omp parallel for num_threads(8)
     for (int t = 0; t < total_anchors; ++t) {
@@ -325,7 +502,76 @@ class MultiProposalGPUOp : public Operator{
       proposals[5*t + 1] = anchors[4*i+1] + j * param_.feature_stride;
       proposals[5*t + 2] = anchors[4*i+2] + k * param_.feature_stride;
       proposals[5*t + 3] = anchors[4*i+3] + j * param_.feature_stride;
+          // suppress anchors of type t1 for stride x%,
+      if(((i+4)%7==0 || (i+2)%7==0)){
+        proposals[5*t + 4] = -1;
+        continue;
+      }
       proposals[5*t + 4] = scores[b*count_anchors*2 + ((num_anchors + i)*height + j)*width + k];
+    }
+
+    std::vector<std::vector<int>> suppression_list(num_anchors);
+
+    for(int i = 0; i < num_anchors; i++){
+        suppression_list[i] = std::vector<int>(0);
+    }
+    // Precompute the anchor overlap
+    if (!is_anchor_overlap_precomputed){
+        for(int i = 0; i < num_anchors; i++){
+            anchor_iou_dp.push_back(std::vector<int>());
+        }
+        
+        float thresh = param_.roi_iou_thresh;
+        int a1_c, a2_c;
+        int feat_size = width*height;
+
+        for(int i = 0; i < num_anchors; i++){
+            a1_c = i;
+            a1_x1 = anchors[4*i + 0];
+            a1_y1 = anchors[4*i + 1];
+            a1_x2 = anchors[4*i + 2];
+            a1_y2 = anchors[4*i + 3];
+            a1_area = anchor_area[i];
+            for(int t = 0; t < count_anchors; t++){
+
+              a2_c = t / (feat_size);
+
+              int mat = t % (feat_size);
+              int k = mat % width; //width index
+              int j = mat / width; //height index
+
+              a2_area = anchor_area[a2_c];
+
+              a2_x1 = proposals[5*t+0];
+              a2_y1 = proposals[5*t+1];
+              a2_x2 = proposals[5*t+2];
+              a2_y2 = proposals[5*t+3];
+               //Compute iou between anchor 1 & anchor 2
+              float xx1 = std::max(a1_x1, a2_x1);
+              float yy1 = std::max(a1_y1, a2_y1);
+              float xx2 = std::min(a1_x2, a2_x2);
+              float yy2 = std::min(a1_y2, a2_y2);
+              float w = std::max(0.0f, xx2 - xx1 + 1.0f);
+              float h = std::max(0.0f, yy2 - yy1 + 1.0f);
+              float inter = w * h;
+              float ovr = inter / (a1_area + a2_area - inter);
+
+              if(j==0 && k==0 && a2_c==a1_c){
+                    continue;
+              }
+
+
+              if (ovr >= thresh){
+              // +dx +dy
+                utils::insert_anchor_iou(anchor_iou_dp, a1_c, a2_c, j, k);
+                utils::insert_anchor_iou(anchor_iou_dp, a1_c, a2_c, -j, k);
+                utils::insert_anchor_iou(anchor_iou_dp, a1_c, a2_c, -j, -k);
+                utils::insert_anchor_iou(anchor_iou_dp, a1_c, a2_c, j, -k);
+              }
+
+            }
+        }
+        is_anchor_overlap_precomputed = true;
     }
 
     utils::BBoxTransformInv(proposals, bbox_deltas, im_info, num_images, num_anchors, height, width);
@@ -336,10 +582,23 @@ class MultiProposalGPUOp : public Operator{
     for (int i = 0; i < num_images; i++) {
       keep_images[i] = std::vector<int>(0);
     }
-    //std::cout << "quack 5" << std::endl;
     int rpn_post_nms_top_n = param_.rpn_post_nms_top_n;
-    utils::NonMaximumSuppression(proposals, rpn_post_nms_top_n, num_images, num_anchors, width, height, keep_images);
-    //std::cout << "quack 6" << std::endl;
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+
+    if (useFastNMS) {
+      utils::FastNonMaxSuppression(proposals, anchor_iou_dp, rpn_post_nms_top_n, num_images, num_anchors, width, height,
+                                    keep_images, suppression_list);
+    }
+    else {
+      utils::NonMaximumSuppression(proposals, rpn_post_nms_top_n, num_images, num_anchors, width, height, keep_images,
+                                    suppression_list, anchors, param_.feature_stride, param_.roi_iou_thresh);
+    }
+
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    
     #pragma omp parallel for num_threads(8)
     for (int i = 0; i < num_images; i++) {
       int numpropsi = keep_images[i].size();
@@ -362,15 +621,13 @@ class MultiProposalGPUOp : public Operator{
         rois[5*base+4] = 200 + rand() % 200;
         out_scores[base] = 0.0;
       }
-
     }
 
     Stream<gpu> *so = ctx.get_stream<gpu>();
     Tensor<gpu,1> oscores = out_data[proposal::kScores].get<gpu, 1, real_t>(so);    
     Tensor<gpu, 2> orois = out_data[proposal::kRoIs].get<gpu, 2, real_t>(so);
     cudaMemcpy(orois.dptr_, rois, 5*sizeof(float) * num_images * rpn_post_nms_top_n, cudaMemcpyHostToDevice);
-    cudaMemcpy(oscores.dptr_, out_scores, sizeof(float) * num_images * rpn_post_nms_top_n, cudaMemcpyHostToDevice);  
-
+    cudaMemcpy(oscores.dptr_, out_scores, sizeof(float) * num_images * rpn_post_nms_top_n, cudaMemcpyHostToDevice);
   }
 
   virtual void Backward(const OpContext &ctx,

@@ -62,6 +62,7 @@ struct MultiProposalParam : public dmlc::Parameter<MultiProposalParam> {
   nnvm::Tuple<float> scales;
   nnvm::Tuple<float> ratios;
   int feature_stride;
+  float roi_iou_thresh;
   DMLC_DECLARE_PARAMETER(MultiProposalParam) {
     float tmp[] = {0, 0, 0, 0, 0, 0, 0};
     DMLC_DECLARE_FIELD(rpn_pre_nms_top_n).set_default(6000)
@@ -75,6 +76,8 @@ struct MultiProposalParam : public dmlc::Parameter<MultiProposalParam> {
     .describe("batch size");
     DMLC_DECLARE_FIELD(bbox_scale).set_default(1)
     .describe("Scale BBox ");
+    DMLC_DECLARE_FIELD(roi_iou_thresh).set_default(0.3)
+    .describe("Precomputed anchor overlap IOU, only monitor proposals with IOU>= this threshold in anchor spaces");
     DMLC_DECLARE_FIELD(rpn_min_size).set_default(4)
     .describe("Minimum height or width in proposal");
     tmp[0] = 2.0f; tmp[1] = 4.0f; tmp[2] = 7.0f; tmp[3] = 10.0f; tmp[4] = 13.0f; tmp[5] = 16.0f; tmp[6] = 24.0f;
